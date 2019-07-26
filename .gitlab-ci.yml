@@ -1,0 +1,42 @@
+image: condaforge/linux-anvil-comp7
+
+stages:
+  - build
+  - deliver
+
+variables:
+    CONDA_CHANNEL_HOSTNAME: 10.1.4.209
+    CONDA_CHANNEL_USER: capella
+    CONDA_BLD_PATH: /tmp/build_artifacts
+
+build_artifact:
+    stage: build
+    script:
+      - conda build cicd/conda/
+      - mv $CONDA_BLD_PATH ./build_artifacts
+    artifacts:
+        paths:
+          - build_artifacts
+        expire_in: '1 day'
+
+
+deliver_artifact:
+    stage: deliver
+    dependencies:
+      - build_artifact
+    script:
+      - 'which ssh-agent || ( sudo yum install openssh-client git -y )'
+      - eval $(ssh-agent -s)
+      - echo "$CONDA_CHANNEL_SSH_PRIVATE_KEY2" | tr -d '\r' > /tmp/key
+      - chmod go-rw /tmp/key
+      - ssh-add /tmp/key
+      - mkdir -p ~/.ssh
+      - chmod 700 ~/.ssh
+      - ssh-keyscan $CONDA_CHANNEL_HOSTNAME >> ~/.ssh/known_hosts
+      - chmod 644 ~/.ssh/known_hosts
+      - scp -i /tmp/key -vr build_artifacts/linux-64/capella-sarpy*.tar.bz2 $CONDA_CHANNEL_USER@$CONDA_CHANNEL_HOSTNAME:/data/channel/linux-64/
+      - rm -rf /tmp/key
+    only:
+      - '/^(\d+\.)?(\d+\.)?(\d+)$/'
+    except:
+      - branches
