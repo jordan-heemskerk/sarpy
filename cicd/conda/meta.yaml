@@ -10,11 +10,13 @@ requirements:
     - python
     - setuptools
     - numpy
+    - scipy
     - setuptools_scm
 
   run:
     - python
     - numpy
+    - scipy
 
 about:
     home: https://gitlab.corp.capellaspace.com/sar/sarpy
