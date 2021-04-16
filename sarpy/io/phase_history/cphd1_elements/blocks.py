@@ -3,13 +3,17 @@
 Basic building blocks for CPHD standard - mostly overlap with SICD elements
 """
 
+__classification__ = "UNCLASSIFIED"
+__author__ = "Thomas McCullough"
+
+
 from typing import Union, List
 
 import numpy
 
 from .base import DEFAULT_STRICT
 # noinspection PyProtectedMember
-from ...complex.sicd_elements.base import Serializable, Arrayable, SerializableArray, \
+from sarpy.io.complex.sicd_elements.base import Serializable, Arrayable, SerializableArray, \
     _SerializableDescriptor, _SerializableArrayDescriptor, \
     _IntegerDescriptor, _FloatDescriptor
 
@@ -230,6 +234,7 @@ class XYVertexType(XYType):
 
     _fields = ('X', 'Y', 'index')
     _required = _fields
+    _set_as_attribute = ('index', )
     # descriptors
     index = _IntegerDescriptor(
         'index', _required, strict=DEFAULT_STRICT, bounds=(1, None),

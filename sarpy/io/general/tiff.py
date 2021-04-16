@@ -14,8 +14,7 @@ import numpy
 import re
 
 from sarpy.compliance import int_func
-from .base import BaseReader
-from .bip import BIPChipper
+from sarpy.io.general.base import BaseReader, BIPChipper
 
 
 __classification__ = "UNCLASSIFIED"
@@ -137,7 +136,8 @@ _GEOTIFF_TAGS = {
 
 def is_a(file_name):
     """
-    Tests whether a given file_name corresponds to a tiff file. Returns a reader instance, if so.
+    Tests whether a given file_name corresponds to a tiff file. Returns a
+    tiff reader instance, if so.
 
     Parameters
     ----------
@@ -152,7 +152,7 @@ def is_a(file_name):
 
     try:
         tiff_details = TiffDetails(file_name)
-        print('File {} is determined to be a tiff file.'.format(file_name))
+        logging.info('File {} is determined to be a tiff file.'.format(file_name))
         return TiffReader(tiff_details)
     except IOError:
         # we don't want to catch parsing errors, for now
@@ -440,19 +440,36 @@ class NativeTiffChipper(BIPChipper):
             bits_per_sample = tiff_details.tags['BitsPerSample'][0]
         else:
             bits_per_sample = tiff_details.tags['BitsPerSample']
-        complex_type = (int(tiff_details.tags['SamplesPerPixel']) == 2)  # NB: this is obviously not general
+
+        raw_bands = int(tiff_details.tags['SamplesPerPixel'])
+
         if samp_form in [5, 6]:
+            transform_data = 'COMPLEX'
+            output_bands = int(raw_bands)
+            raw_bands *= 2
             bits_per_sample /= 2
-            complex_type = True
+            output_dtype = 'complex64'
+        elif raw_bands == 2:
+            # NB: this is heavily skewed towards SAR and obviously not general
+            transform_data = 'COMPLEX'
+            output_dtype = 'complex64'
+            output_bands = 1
+        else:
+            transform_data = None
+            output_bands = raw_bands
+            output_dtype = None
+
         data_size = (int_func(tiff_details.tags['ImageLength']), int_func(tiff_details.tags['ImageWidth']))
-        data_type = numpy.dtype('{0:s}{1:s}{2:d}'.format(self._tiff_details.endian,
-                                                         self._SAMPLE_FORMATS[samp_form],
-                                                         int(bits_per_sample/8)))
+        raw_dtype = numpy.dtype('{0:s}{1:s}{2:d}'.format(
+            self._tiff_details.endian, self._SAMPLE_FORMATS[samp_form], int(bits_per_sample/8)))
+
+        if output_dtype is None:
+            output_dtype = raw_dtype
         data_offset = int_func(tiff_details.tags['StripOffsets'][0])
 
         super(NativeTiffChipper, self).__init__(
-            tiff_details.file_name, data_type, data_size, symmetry=symmetry, complex_type=complex_type,
-            data_offset=data_offset, bands_ip=1)
+            tiff_details.file_name, raw_dtype, data_size, raw_bands, output_bands, output_dtype,
+            symmetry=symmetry, transform_data=transform_data, data_offset=data_offset)
 
 
 class TiffReader(BaseReader):
@@ -480,7 +497,7 @@ class TiffReader(BaseReader):
             symmetry = self._DEFAULT_SYMMETRY
 
         chipper = NativeTiffChipper(tiff_details, symmetry=symmetry)
-        super(TiffReader, self).__init__(sicd_meta, chipper)
+        super(TiffReader, self).__init__(sicd_meta, chipper, reader_type="OTHER")
 
     @property
     def tiff_details(self):

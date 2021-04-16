@@ -15,27 +15,26 @@ from scipy.constants import speed_of_light
 from scipy.interpolate import griddata
 
 from sarpy.compliance import string_types
-from ..general.base import SubsetReader, BaseReader
-from ..general.tiff import TiffDetails, TiffReader
-from ..general.utils import get_seconds, parse_timestring
+from sarpy.io.general.base import SubsetReader, BaseReader
+from sarpy.io.general.tiff import TiffDetails, TiffReader
+from sarpy.io.general.utils import get_seconds, parse_timestring
 
-from .sicd_elements.blocks import Poly1DType, Poly2DType
-from .sicd_elements.SICD import SICDType
-from .sicd_elements.CollectionInfo import CollectionInfoType, RadarModeType
-from .sicd_elements.ImageCreation import ImageCreationType
-from .sicd_elements.RadarCollection import RadarCollectionType, WaveformParametersType, \
+from sarpy.io.complex.sicd_elements.blocks import Poly1DType, Poly2DType
+from sarpy.io.complex.sicd_elements.SICD import SICDType
+from sarpy.io.complex.sicd_elements.CollectionInfo import CollectionInfoType, RadarModeType
+from sarpy.io.complex.sicd_elements.ImageCreation import ImageCreationType
+from sarpy.io.complex.sicd_elements.RadarCollection import RadarCollectionType, WaveformParametersType, \
     TxFrequencyType, ChanParametersType
-from .sicd_elements.ImageData import ImageDataType
-from .sicd_elements.GeoData import GeoDataType, SCPType
-from .sicd_elements.Position import PositionType, XYZPolyType
-from .sicd_elements.Grid import GridType, DirParamType, WgtTypeType
-from .sicd_elements.Timeline import TimelineType, IPPSetType
-from .sicd_elements.ImageFormation import ImageFormationType, RcvChanProcType, TxFrequencyProcType
-from .sicd_elements.RMA import RMAType, INCAType
-from .sicd_elements.Radiometric import RadiometricType, NoiseLevelType_
-from ...geometry import point_projection
-from ...geometry.geocoords import geodetic_to_ecf
-from .utils import two_dim_poly_fit, get_im_physical_coords
+from sarpy.io.complex.sicd_elements.ImageData import ImageDataType
+from sarpy.io.complex.sicd_elements.GeoData import GeoDataType, SCPType
+from sarpy.io.complex.sicd_elements.Position import PositionType, XYZPolyType
+from sarpy.io.complex.sicd_elements.Grid import GridType, DirParamType, WgtTypeType
+from sarpy.io.complex.sicd_elements.Timeline import TimelineType, IPPSetType
+from sarpy.io.complex.sicd_elements.ImageFormation import ImageFormationType, RcvChanProcType, TxFrequencyProcType
+from sarpy.io.complex.sicd_elements.RMA import RMAType, INCAType
+from sarpy.io.complex.sicd_elements.Radiometric import RadiometricType, NoiseLevelType_
+from sarpy.geometry.geocoords import geodetic_to_ecf
+from sarpy.io.complex.utils import two_dim_poly_fit, get_im_physical_coords
 
 __classification__ = "UNCLASSIFIED"
 __author__ = ("Thomas McCullough", "Daniel Haverporth")
@@ -62,7 +61,7 @@ def is_a(file_name):
 
     try:
         sentinel_details = SentinelDetails(file_name)
-        print('Path {} is determined to be or contain a Sentinel-1 manifest.safe file.'.format(file_name))
+        logging.info('Path {} is determined to be or contain a Sentinel-1 manifest.safe file.'.format(file_name))
         return SentinelReader(sentinel_details)
     except (IOError, AttributeError, SyntaxError, ElementTree.ParseError):
         return None
@@ -438,7 +437,7 @@ class SentinelDetails(object):
             return radar_collection
 
         def get_image_formation():  # type: () -> ImageFormationType
-            st_bean_comp = 'NO' if out_sicd.CollectionInfo.RadarMode.ModeID[0] == 'S' else 'SV'
+            st_beam_comp = 'GLOBAL' if out_sicd.CollectionInfo.RadarMode.ModeID[0] == 'S' else 'SV'
             pol = self._parse_pol(root_node.find('./adsHeader/polarisation').text)
             # which channel does this pol correspond to?
             chan_indices = None
@@ -455,10 +454,10 @@ class SentinelDetails(object):
                                           MinProc=out_sicd.RadarCollection.TxFrequency.Min,
                                           MaxProc=out_sicd.RadarCollection.TxFrequency.Max),
                                       ImageFormAlgo='RMA',
-                                      ImageBeamComp='NO',
+                                      ImageBeamComp='SV',
                                       AzAutofocus='NO',
                                       RgAutofocus='NO',
-                                      STBeamComp=st_bean_comp)
+                                      STBeamComp=st_beam_comp)
 
         def get_rma():  # type: () -> RMAType
             center_frequency = get_center_frequency()
@@ -575,6 +574,7 @@ class SentinelDetails(object):
 
         def update_rma_and_grid(sicd, first_line_relative_start, start, return_time_dets=False):
             # type: (SICDType, Union[float, int], numpy.datetime64, bool) -> Union[None, Tuple[float, float]]
+
             center_frequency = get_center_frequency()
             # set TimeCAPoly
             ss_zd_s = get_image_col_spacing_zdt()
@@ -679,8 +679,9 @@ class SentinelDetails(object):
             sicd.Position.ARPPoly = sicd.Position.ARPPoly.shift(-time_offset, return_poly=True)
 
         def update_geodata(sicd):  # type: (SICDType) -> None
-            ecf = point_projection.image_to_ground([sicd.ImageData.SCPPixel.Row, sicd.ImageData.SCPPixel.Col], sicd)
-            sicd.GeoData.SCP = SCPType(ECF=ecf)  # LLH will be populated.
+            scp_pixel = [sicd.ImageData.SCPPixel.Row, sicd.ImageData.SCPPixel.Col]
+            ecf = sicd.project_image_to_ground(scp_pixel, projection_type='HAE')
+            sicd.update_scp(ecf, coord_system='ECF')
 
         def get_scps(count):
             # SCPPixel - points at which to interpolate geo_pixels & geo_coords data
@@ -755,7 +756,6 @@ class SentinelDetails(object):
                 # adjust my time offset
                 adjust_time(t_sicd, early)
                 update_geodata(t_sicd)
-                t_sicd.derive()
                 sicds.append(t_sicd)
             return sicds
 
@@ -1065,7 +1065,7 @@ class SentinelReader(BaseReader):
 
         sicd_tuple = tuple(reader.sicd_meta for reader in readers)
         chipper_tuple = tuple(reader._chipper for reader in readers)
-        super(SentinelReader, self).__init__(sicd_tuple, chipper_tuple, is_sicd_type=True)
+        super(SentinelReader, self).__init__(sicd_tuple, chipper_tuple, reader_type="SICD")
 
     @property
     def sentinel_details(self):

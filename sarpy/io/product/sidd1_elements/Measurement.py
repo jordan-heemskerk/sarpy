@@ -5,13 +5,13 @@ The MeasurementType definition for SIDD 1.0.
 
 from typing import Union
 
-from ..sidd2_elements.base import DEFAULT_STRICT
+from sarpy.io.product.sidd2_elements.base import DEFAULT_STRICT
 
 # noinspection PyProtectedMember
-from ...complex.sicd_elements.base import Serializable, _SerializableDescriptor
-from ..sidd2_elements.blocks import Poly2DType, RowColIntType, XYZPolyType
-from ..sidd2_elements.Measurement import PolynomialProjectionType, GeographicProjectionType, \
-    PlaneProjectionType, CylindricalProjectionType
+from sarpy.io.complex.sicd_elements.base import Serializable, _SerializableDescriptor
+from sarpy.io.product.sidd2_elements.blocks import RowColIntType, XYZPolyType
+from sarpy.io.product.sidd2_elements.Measurement import PolynomialProjectionType, \
+    GeographicProjectionType, PlaneProjectionType, CylindricalProjectionType
 
 __classification__ = "UNCLASSIFIED"
 __author__ = "Thomas McCullough"
@@ -24,10 +24,10 @@ class MeasurementType(Serializable):
 
     _fields = (
         'PolynomialProjection', 'GeographicProjection', 'PlaneProjection', 'CylindricalProjection',
-        'PixelFootprint', 'ARPFlag', 'ARPPoly')
+        'PixelFootprint', 'ARPPoly')
     _required = ('PixelFootprint', 'ARPPoly')
-    _collections_tags = {'ValidData': {'array': True, 'child_tag': 'Vertex'}}
-    _numeric_format = {'ValidData': '0.16G'}
+    _choice = ({'required': False, 'collection': ('PolynomialProjection', 'GeographicProjection',
+                                                  'PlaneProjection', 'CylindricalProjection')}, )
     # Descriptor
     PolynomialProjection = _SerializableDescriptor(
         'PolynomialProjection', PolynomialProjectionType, _required, strict=DEFAULT_STRICT,
@@ -47,7 +47,7 @@ class MeasurementType(Serializable):
                   'Design and Exploitation document.')  # type: Union[None, CylindricalProjectionType]
     PixelFootprint = _SerializableDescriptor(
         'PixelFootprint', RowColIntType, _required, strict=DEFAULT_STRICT,
-        docstring='Size of the image in pixels.')  # type: RowColType
+        docstring='Size of the image in pixels.')  # type: RowColIntType
     ARPPoly = _SerializableDescriptor(
         'ARPPoly', XYZPolyType, _required, strict=DEFAULT_STRICT,
         docstring='Center of aperture polynomial (units = m) based upon time into '
@@ -63,7 +63,7 @@ class MeasurementType(Serializable):
         GeographicProjection : GeographicProjectionType
         PlaneProjection : PlaneProjectionType
         CylindricalProjection : CylindricalProjectionType
-        ARPPoly : Poly2DType|numpy.ndarray|list|tuple
+        ARPPoly : XYZPolyType|numpy.ndarray|list|tuple
         kwargs
         """
 
@@ -77,3 +77,11 @@ class MeasurementType(Serializable):
         self.CylindricalProjection = CylindricalProjection
         self.ARPPoly = ARPPoly
         super(MeasurementType, self).__init__(**kwargs)
+
+    @property
+    def ProjectionType(self):
+        """str: *READ ONLY* Identifies the specific image projection type supplied."""
+        for attribute in self._choice[0]['collection']:
+            if getattr(self, attribute) is not None:
+                return attribute
+        return None

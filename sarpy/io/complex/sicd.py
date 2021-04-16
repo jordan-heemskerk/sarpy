@@ -10,18 +10,16 @@ import logging
 import numpy
 
 from sarpy.compliance import string_types
-from ..general.base import validate_sicd_for_writing
-from ..general.bip import MultiSegmentChipper
-from ..general.nitf import NITFReader, NITFWriter, ImageDetails, DESDetails, \
+from sarpy.io.general.base import validate_sicd_for_writing, AggregateChipper
+from sarpy.io.general.nitf import NITFReader, NITFWriter, ImageDetails, DESDetails, \
     image_segmentation, get_npp_block, interpolate_corner_points_string
-from ..general.utils import parse_xml_from_string
-# noinspection PyProtectedMember
-from .sicd_elements.SICD import SICDType, _SICD_SPECIFICATION_IDENTIFIER
+from sarpy.io.general.utils import parse_xml_from_string
+from sarpy.io.complex.sicd_elements.SICD import SICDType, get_specification_identifier
 
-from ..general.nitf import NITFDetails
-from ..general.nitf_elements.des import DataExtensionHeader, XMLDESSubheader
-from ..general.nitf_elements.security import NITFSecurityTags
-from ..general.nitf_elements.image import ImageSegmentHeader, ImageBands, ImageBand
+from sarpy.io.general.nitf import NITFDetails
+from sarpy.io.general.nitf_elements.des import DataExtensionHeader, XMLDESSubheader
+from sarpy.io.general.nitf_elements.security import NITFSecurityTags
+from sarpy.io.general.nitf_elements.image import ImageSegmentHeader, ImageBands, ImageBand
 
 
 if sys.version_info[0] < 3:
@@ -42,7 +40,8 @@ __author__ = ("Thomas McCullough", "Wade Schwartzkopf")
 
 def is_a(file_name):
     """
-    Tests whether a given file_name corresponds to a SICD file. Returns a reader instance, if so.
+    Tests whether a given file_name corresponds to a SICD file, and returns
+    a reader instance, if so.
 
     Parameters
     ----------
@@ -52,18 +51,16 @@ def is_a(file_name):
     Returns
     -------
     SICDReader|None
-        `SICDReader` instance if SICD file, `None` otherwise
     """
 
     try:
         nitf_details = SICDDetails(file_name)
         if nitf_details.is_sicd:
-            print('File {} is determined to be a SICD (NITF format) file.'.format(file_name))
+            logging.info('File {} is determined to be a SICD (NITF format) file.'.format(file_name))
             return SICDReader(nitf_details)
         else:
             return None
     except IOError:
-        # we don't want to catch parsing errors, for now
         return None
 
 
@@ -167,7 +164,10 @@ class SICDDetails(NITFDetails):
                         self._des_index = i
                         self._des_header = des_header
                         self._is_sicd = True
-                        self._sicd_meta = SICDType.from_node(root_node, xml_ns, ns_key='default')
+                        if xml_ns is None:
+                            self._sicd_meta = SICDType.from_node(root_node, xml_ns, ns_key=None)
+                        else:
+                            self._sicd_meta = SICDType.from_node(root_node, xml_ns, ns_key='default')
                         break
                 except Exception:
                     continue
@@ -186,7 +186,10 @@ class SICDDetails(NITFDetails):
                         self._des_index = i
                         self._des_header = None
                         self._is_sicd = True
-                        self._sicd_meta = SICDType.from_node(root_node, xml_ns, ns_key='default')
+                        if xml_ns is None:
+                            self._sicd_meta = SICDType.from_node(root_node, xml_ns, ns_key=None)
+                        else:
+                            self._sicd_meta = SICDType.from_node(root_node, xml_ns, ns_key='default')
                         break
                 except Exception as e:
                     logging.error('We found an apparent old-style SICD DES header, '
@@ -195,7 +198,12 @@ class SICDDetails(NITFDetails):
 
         if not self._is_sicd:
             return
-        self._sicd_meta.derive()
+
+        # noinspection PyBroadException
+        try:
+            self._sicd_meta.derive()
+        except Exception as e:
+            pass
         # TODO: account for the reference frequency offset situation
 
     def is_des_well_formed(self):
@@ -216,7 +224,7 @@ class SICDDetails(NITFDetails):
         sicd_des = self._des_header.UserHeader
         if not isinstance(sicd_des, XMLDESSubheader):
             return None
-        return sicd_des.DESSHSI.strip() == _SICD_SPECIFICATION_IDENTIFIER
+        return sicd_des.DESSHSI.strip() == get_specification_identifier()
 
     def repair_des_header(self):
         """
@@ -240,8 +248,7 @@ class SICDDetails(NITFDetails):
             return 1
 
         sicd_des = self._des_header.UserHeader
-        # noinspection PyProtectedMember
-        sicd_des.DESSHSI = _SICD_SPECIFICATION_IDENTIFIER
+        sicd_des.DESSHSI = get_specification_identifier()
         stat = self.rewrite_des_header()
         return 2 if stat else 3
 
@@ -279,7 +286,8 @@ class SICDDetails(NITFDetails):
 #######
 #  The actual reading implementation
 
-def _validate_lookup(lookup_table):  # type: (numpy.ndarray) -> None
+def _validate_lookup(lookup_table):
+    # type: (numpy.ndarray) -> None
     if not isinstance(lookup_table, numpy.ndarray):
         raise ValueError('requires a numpy.ndarray, got {}'.format(type(lookup_table)))
     if lookup_table.dtype.name != 'float64':
@@ -311,11 +319,11 @@ def amp_phase_to_complex(lookup_table):
         if data.dtype.name != 'uint8':
             raise ValueError('requires a numpy.ndarray of uint8 dtype, got {}'.format(data.dtype.name))
 
-        if len(data.shape) == 3:
+        if len(data.shape) != 3:
             raise ValueError('Requires a three-dimensional numpy.ndarray (with band '
                              'in the last dimension), got shape {}'.format(data.shape))
 
-        out = numpy.zeros((data.shape[0], data.shape[1], data.shape[2]/2), dtype=numpy.complex64)
+        out = numpy.zeros((data.shape[0], data.shape[1], int(data.shape[2]/2)), dtype=numpy.complex64)
         amp = lookup_table[data[:, :, 0::2]]
         theta = data[:, :, 1::2]*(2*numpy.pi/256)
         out.real = amp*numpy.cos(theta)
@@ -343,15 +351,12 @@ class SICDReader(NITFReader):
         if not isinstance(nitf_details, SICDDetails):
             raise TypeError('The input argument for SICDReader must be a filename or '
                             'SICDDetails object.')
-        if not nitf_details.is_sicd:
-            raise ValueError(
-                'The input file passed in appears to be a NITF 2.1 file that does '
-                'not contain valid sicd metadata.')
-        super(SICDReader, self).__init__(nitf_details, is_sicd_type=True)
+        super(SICDReader, self).__init__(nitf_details, reader_type="SICD")
 
         # to perform a preliminary check that the structure is valid:
-        #   note that this results in potentially noisy logging for troubled sicd files
-        self._sicd_meta.is_valid(recursive=True)
+        # self._sicd_meta.is_valid(recursive=True, stack=False)
+        # disable for now, due to noise of logging for now purpose
+        # leaving for documentation purposes
 
     @property
     def nitf_details(self):
@@ -366,54 +371,43 @@ class SICDReader(NITFReader):
     def _find_segments(self):
         return [list(range(self.nitf_details.img_segment_offsets.size)), ]
 
-    def _check_img_header(self, segment, expected_abpp, pixel_type):
-        """
-        Check the observed values in the image subheaders for validity.
-
-        Parameters
-        ----------
-        segment : List[int]
-        expected_abpp : int
-        pixel_type : str
-
-        Returns
-        -------
-        None
-        """
-
-        for i, this_index in enumerate(segment):
-            img_header = self.nitf_details.img_headers[this_index]
-            # verify abpp is as expected
-            if img_header.ABPP != expected_abpp:
-                raise ValueError(
-                    'NITF image segment {} should have ABPP {} as indicated by pixel_type {}, but got {}'.format(
-                        this_index, expected_abpp, pixel_type, img_header.ABPP))
-
     def _construct_chipper(self, segment, index):
         meta = self.sicd_meta
         pixel_type = meta.ImageData.PixelType
         # NB: SICDs are required to be stored as big-endian
         if pixel_type == 'RE32F_IM32F':
-            dtype = numpy.dtype('>f4')
-            complex_type = True
-            abpp = 32
+            raw_dtype = numpy.dtype('>f4')
+            transform_data = 'COMPLEX'
         elif pixel_type == 'RE16I_IM16I':
-            dtype = numpy.dtype('>i2')
-            complex_type = True
-            abpp = 16
+            raw_dtype = numpy.dtype('>i2')
+            transform_data = 'COMPLEX'
         elif pixel_type == 'AMP8I_PHS8I':
-            dtype = numpy.dtype('>u1')
-            complex_type = amp_phase_to_complex(meta.ImageData.AmpTable)
-            abpp = 8
+            raw_dtype = numpy.dtype('>u1')
+            transform_data = amp_phase_to_complex(meta.ImageData.AmpTable)
         else:
             raise ValueError('Pixel Type {} not recognized.'.format(pixel_type))
 
-        self._check_img_header(segment, abpp, pixel_type)
-        bounds, offsets = self._get_chipper_partitioning(segment, meta.ImageData.NumRows, meta.ImageData.NumCols)
-        return MultiSegmentChipper(
-            self.nitf_details.file_name, bounds, offsets, dtype,
-            symmetry=(False, False, False), complex_type=complex_type,
-            bands_ip=1)
+        # verify that the collective output of _extract_chipper_params makes sense
+        for img_index in segment:
+            inp_dtype, _, _, _, _ = self._extract_chipper_params(img_index)
+            if inp_dtype.name != raw_dtype.name:
+                raise ValueError(
+                    'Image segment at index {} apparently has dtype {}, expected {} '
+                    'from the SICD definition'.format(img_index, inp_dtype, raw_dtype))
+
+        if len(segment) == 1:
+            return self._define_chipper(
+                segment[0], raw_dtype=raw_dtype, raw_bands=2, transform_data=transform_data,
+                output_dtype='complex64', output_bands=1)
+        else:
+            # get the bounds definition
+            bounds = self._get_chipper_partitioning(segment, meta.ImageData.NumRows, meta.ImageData.NumCols)
+            # define the chippers collection
+            chippers = [
+                self._define_chipper(img_index, raw_dtype=raw_dtype, raw_bands=2, transform_data=transform_data,
+                                     output_dtype='complex64', output_bands=1) for img_index in segment]
+            # define the aggregate chipper
+            return AggregateChipper(bounds, 'complex64', chippers, output_bands=1)
 
 
 #######
@@ -472,7 +466,6 @@ def complex_to_int(data):
     numpy.ndarray
     """
 
-    # TODO: this is naive. Scaling down to 16-bit limits requires thought.
     new_shape = _validate_input(data)
 
     if data.dtype.name == 'complex128':
@@ -505,15 +498,15 @@ def extract_clas(sicd):
     if sicd.CollectionInfo is None or sicd.CollectionInfo.Classification is None:
         return 'U'
 
-    c_str = sicd.CollectionInfo.Classification
+    c_str = sicd.CollectionInfo.Classification.upper().strip()
 
-    if 'UNCLASS' in c_str.upper():
+    if 'UNCLASS' in c_str or c_str == 'U':
         return 'U'
-    elif 'CONFIDENTIAL' in c_str.upper():
+    elif 'CONFIDENTIAL' in c_str or c_str == 'C' or c_str.startswith('C/'):
         return 'C'
-    elif 'TOP SECRET' in c_str.upper():
+    elif 'TOP SECRET' in c_str or c_str == 'TS' or c_str.startswith('TS/'):
         return 'T'
-    elif 'SECRET' in c_str.upper():
+    elif 'SECRET' in c_str or c_str == 'S' or c_str.startswith('S/'):
         return 'S'
     elif 'FOUO' in c_str.upper() or 'RESTRICTED' in c_str.upper():
         return 'R'
@@ -529,16 +522,22 @@ class SICDWriter(NITFWriter):
     SICD data extension. 
     """
 
-    __slots__ = ('_sicd_meta', )
+    __slots__ = ('_sicd_meta', '_check_older_version')
 
-    def __init__(self, file_name, sicd_meta):
+    def __init__(self, file_name, sicd_meta, check_older_version=False, check_existence=True):
         """
 
         Parameters
         ----------
         file_name : str
         sicd_meta : sarpy.io.complex.sicd_elements.SICD.SICDType
+        check_older_version : bool
+            Try to create a version 1.1 sicd, if possible?
+        check_existence : bool
+            Should we check if the given file already exists, and raises an exception if so?
         """
+
+        self._check_older_version = check_older_version
         self._sicd_meta = validate_sicd_for_writing(sicd_meta)
         self._security_tags = None
         self._nitf_header = None
@@ -546,7 +545,7 @@ class SICDWriter(NITFWriter):
         self._img_details = None
         self._des_details = None
         self._shapes = ((self.sicd_meta.ImageData.NumRows, self.sicd_meta.ImageData.NumCols), )
-        super(SICDWriter, self).__init__(file_name)
+        super(SICDWriter, self).__init__(file_name, check_existence=check_existence)
 
     @property
     def sicd_meta(self):
@@ -575,7 +574,9 @@ class SICDWriter(NITFWriter):
 
         def get_basic_args():
             out = {}
+            # noinspection PyProtectedMember
             if hasattr(self._sicd_meta, '_NITF') and isinstance(self._sicd_meta._NITF, dict):
+                # noinspection PyProtectedMember
                 sec_tags = self._sicd_meta._NITF.get('Security', {})
                 # noinspection PyProtectedMember
                 for fld in NITFSecurityTags._ordering:
@@ -596,10 +597,15 @@ class SICDWriter(NITFWriter):
             if code is not None:
                 args['CODE'] = code.group()
 
+        def get_clsy():
+            if args.get('CLSY', '').strip() == '':
+                args['CLSY'] = 'US'
+
         args = get_basic_args()
         if self._sicd_meta.CollectionInfo is not None:
             get_clas()
             get_code(self._sicd_meta.CollectionInfo.Classification)
+            get_clsy()
         return NITFSecurityTags(**args)
 
     def _create_security_tags(self):
@@ -607,7 +613,9 @@ class SICDWriter(NITFWriter):
 
     def _get_ftitle(self):  # type: () -> str
         ftitle = None
+        # noinspection PyProtectedMember
         if hasattr(self._sicd_meta, '_NITF') and isinstance(self._sicd_meta._NITF, dict):
+            # noinspection PyProtectedMember
             ftitle = self._sicd_meta._NITF.get('SUGGESTED_NAME', None)
         if ftitle is None:
             ftitle = self._sicd_meta.get_suggested_name(1)
@@ -623,7 +631,9 @@ class SICDWriter(NITFWriter):
 
     def _get_ostaid(self):
         ostaid = 'Unknown'
+        # noinspection PyProtectedMember
         if hasattr(self._sicd_meta, '_NITF') and isinstance(self._sicd_meta._NITF, dict):
+            # noinspection PyProtectedMember
             ostaid = self._sicd_meta._NITF.get('OSTAID', 'Unknown')
         return ostaid
 
@@ -636,7 +646,7 @@ class SICDWriter(NITFWriter):
         (int, numpy.dtype, Union[bool, callable], str, tuple, tuple)
             pixel_size - the size of each pixel in bytes.
             dtype - the data type.
-            complex_type -
+            transform_data - the transform_data parameters
             pv_type - the pixel type string.
             isubcat - the image subcategory.
             im_segments - Segmentation of the form `((row start, row end, column start, column end))`
@@ -649,25 +659,27 @@ class SICDWriter(NITFWriter):
             pv_type, isubcat = 'R', ('I', 'Q')
             pixel_size = 8
             dtype = numpy.dtype('>f4')
-            complex_type = True
+            transform_data = 'COMPLEX'
         elif pixel_type == 'RE16I_IM16I':
             pv_type, isubcat = 'SI', ('I', 'Q')
             pixel_size = 4
             dtype = numpy.dtype('>i2')
-            complex_type = complex_to_int
-        else:  # pixel_type == 'AMP8I_PHS8I':
+            transform_data = complex_to_int
+        elif pixel_type == 'AMP8I_PHS8I':
             pv_type, isubcat = 'INT', ('M', 'P')
             pixel_size = 2
             dtype = numpy.dtype('>u1')
-            complex_type = complex_to_amp_phase(self.sicd_meta.ImageData.AmpTable)
+            transform_data = complex_to_amp_phase(self.sicd_meta.ImageData.AmpTable)
+        else:
+            raise ValueError('Got unhandled pixel_type {}'.format(pixel_type))
         image_segment_limits = image_segmentation(
             self.sicd_meta.ImageData.NumRows, self.sicd_meta.ImageData.NumCols, pixel_size)
-        return pixel_size, dtype, complex_type, pv_type, isubcat, image_segment_limits
+        return pixel_size, dtype, transform_data, pv_type, isubcat, image_segment_limits
 
     def _create_image_segment_details(self):
         super(SICDWriter, self)._create_image_segment_details()
 
-        pixel_size, dtype, complex_type, pv_type, isubcat, image_segment_limits = self._image_parameters()
+        pixel_size, dtype, transform_data, pv_type, isubcat, image_segment_limits = self._image_parameters()
         img_groups = tuple(range(len(image_segment_limits)))
         self._img_groups = (img_groups, )
 
@@ -716,13 +728,13 @@ class SICDWriter(NITFWriter):
                 ILOC='{0:05d}{1:05d}'.format(entry[0], entry[2]),
                 Bands=ImageBands(values=bands),
                 Security=self._security_tags)
-            img_details.append(ImageDetails(1, dtype, complex_type, entry, subhead))
+            img_details.append(ImageDetails(2, dtype, transform_data, entry, subhead))
 
         self._img_details = tuple(img_details)
 
     def _create_data_extension_details(self):
         super(SICDWriter, self)._create_data_extension_details()
-        uh_args = self.sicd_meta.get_des_details()
+        uh_args = self.sicd_meta.get_des_details(self._check_older_version)
 
         desshdt = str(self.sicd_meta.ImageCreation.DateTime.astype('datetime64[s]'))
         if desshdt[-1] != 'Z':
@@ -745,4 +757,4 @@ class SICDWriter(NITFWriter):
             UserHeader=XMLDESSubheader(**uh_args))
 
         self._des_details = (
-            DESDetails(subhead, self.sicd_meta.to_xml_bytes(tag='SICD')), )
+            DESDetails(subhead, self.sicd_meta.to_xml_bytes(tag='SICD', urn=uh_args['DESSHTN'])), )

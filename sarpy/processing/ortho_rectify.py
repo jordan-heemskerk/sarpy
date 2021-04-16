@@ -2,53 +2,142 @@
 """
 SICD ortho-rectification methodology.
 
-Example Usage
+Examples
+--------
+An basic example.
 
->>> import os
->>> from matplotlib import pyplot
->>> from sarpy.io.complex.converter import open_complex
->>> from sarpy.processing.ortho_rectify import NearestNeighborMethod
->>> from sarpy.visualization.remap import linear_discretization
->>> from PIL import Image
+.. code-block:: python
 
->>> reader = open_complex(<file name>)
->>> orth_method = NearestNeighborMethod(reader, index=0, proj_helper=None,
->>>     complex_valued=False, apply_radiometric=None, subtract_radiometric_noise=False)
+    import os
+    from matplotlib import pyplot
+    from sarpy.io.complex.converter import open_complex
+    from sarpy.processing.ortho_rectify import NearestNeighborMethod
 
->>> # Perform ortho-rectification of the entire image
->>> # This will take a long time and be very RAM intensive, unless the image is small
->>> ortho_bounds = orth_method.get_full_ortho_bounds()
->>> ortho_data = orth_method.get_orthorectified_for_ortho_bounds(ortho_bounds)
+    reader = open_complex('<file name>')
+    orth_method = NearestNeighborMethod(reader, index=0, proj_helper=None,
+        complex_valued=False, apply_radiometric=None, subtract_radiometric_noise=False)
 
->>> # or, perform ortho-rectification on a given rectangular region in pixel space
->>> pixel_bounds = [100, 200, 200, 300]  # [first_row, last_row, first_column, last_column]
->>> ortho_data = orth_method.get_orthorectified_for_pixel_bounds(pixel_bounds)
+    # Perform ortho-rectification of the entire image
+    # This will take a long time and be very RAM intensive, unless the image is small
+    ortho_bounds = orth_method.get_full_ortho_bounds()
+    ortho_data = orth_method.get_orthorectified_for_ortho_bounds(ortho_bounds)
 
->>> # view the data using matplotlib
->>> fig, axs = pyplot.subplots(nrows=1, ncols=1)
->>> h1 = axs.imshow(ortho_data, cmap='inferno', aspect='equal')
->>> fig.colorbar(h1, ax=axs)
->>> pyplot.show()
+    # or, perform ortho-rectification on a given rectangular region in pixel space
+    pixel_bounds = [100, 200, 200, 300]  # [first_row, last_row, first_column, last_column]
+    ortho_data = orth_method.get_orthorectified_for_pixel_bounds(pixel_bounds)
 
->>> # write out the data to some image file format
->>> discrete_image = linear_discretization(ortho_data, min_value=None, max_value=None, bit_depth=8)
->>> Image.fromarray(discrete_image).save('filename.jpg')
+    # view the data using matplotlib
+    fig, axs = pyplot.subplots(nrows=1, ncols=1)
+    h1 = axs.imshow(ortho_data, cmap='inferno', aspect='equal')
+    fig.colorbar(h1, ax=axs)
+    pyplot.show()
+
+A viable example performing orthorectification on the entire image and then saving
+to a JPEG.
+
+.. code-block:: python
+
+    import os
+    from sarpy.io.complex.converter import open_complex
+    from sarpy.processing.ortho_rectify import NearestNeighborMethod, \
+        OrthorectificationIterator, FullResolutionFetcher
+    import PIL.Image  # note that this is not a required sarpy dependency
+
+    # again, open a sicd type file
+    reader = open_complex('<file name>')
+    # construct an ortho-rectification helper
+    orth_method = NearestNeighborMethod(reader, index=0, proj_helper=None,
+        complex_valued=False, apply_radiometric=None, subtract_radiometric_noise=False)
+
+    # now, construct an orthorectification iterator - for block processing of orthorectification
+    calculator = FullResolutionFetcher(
+        ortho_helper.reader, index=ortho_helper.index, block_size=10)
+    ortho_iterator = OrthorectificationIterator(ortho_helper, calculator=calculator, bounds=bounds)
+
+    # now, iterate and populate - the whole orthorectified image result workspace
+    # will be kept in RAM, but the processing is iterative and much faster.
+    image_data = numpy.zeros(ortho_iterator.ortho_data_size, dtype='uint8')
+    for data, start_indices in ortho_iterator:
+        image_data[
+        start_indices[0]:start_indices[0]+data.shape[0],
+        start_indices[1]:start_indices[1]+data.shape[1]] = data
+    # convert image array to PIL image.
+    img = PIL.Image.fromarray(image_data)
+    # save the file
+    img.save('<image file name.jpeg>')
 """
 
-from typing import Union
+import logging
+import os
+from typing import Union, Tuple, List, Any
 
 import numpy
 from scipy.interpolate import RectBivariateSpline
 
+from sarpy.compliance import int_func, integer_types, string_types
+from sarpy.io.complex.converter import open_complex
 from sarpy.io.complex.sicd_elements.SICD import SICDType
 from sarpy.io.general.base import BaseReader
-from sarpy.io.general.utils import string_types
+from sarpy.io.general.slice_parsing import validate_slice_int, validate_slice
 from sarpy.io.complex.sicd_elements.blocks import Poly2DType
 from sarpy.geometry.geocoords import geodetic_to_ecf, ecf_to_geodetic, wgs_84_norm
 from sarpy.geometry.geometry_elements import GeometryObject
+from sarpy.visualization.remap import amplitude_to_density, clip_cast
 
 __classification__ = "UNCLASSIFIED"
 __author__ = "Thomas McCullough"
+
+
+##################
+# module variables and helper methods
+_PIXEL_METHODOLOGY = ('MAX', 'MIN', 'MEAN', 'GEOM_MEAN')
+
+
+def _linear_fill(pixel_array, fill_interval=1):
+    """
+    This is to final in linear features in pixel space at the given interval.
+
+    Parameters
+    ----------
+    pixel_array : numpy.ndarray
+    fill_interval : int|float
+
+    Returns
+    -------
+    numpy.ndarray
+    """
+
+    if not isinstance(pixel_array, numpy.ndarray):
+        raise TypeError('pixel_array must be a numpy array. Got type {}'.format(type(pixel_array)))
+    if pixel_array.ndim < 2:
+        # nothing to be done
+        return pixel_array
+
+    if pixel_array.ndim > 2:
+        raise ValueError('pixel_array must be no more than two-dimensional. Got shape {}'.format(pixel_array.shape))
+    if pixel_array.shape[1] != 2:
+        raise ValueError(
+            'pixel_array is two dimensional, and the final dimension must have length 2. '
+            'Got shape {}'.format(pixel_array.shape))
+    if pixel_array.shape[0] < 2:
+        # nothing to be done
+        return pixel_array
+
+    def make_segment(start_point, end_point):
+        segment_length = numpy.linalg.norm(end_point - start_point)
+        segment_count = max(2, int(numpy.ceil(segment_length/float(fill_interval) + 1)))
+        segment = numpy.zeros((segment_count, 2), dtype=numpy.float64)
+        # NB: it's ok if start == end in linspace
+        segment[:, 0] = numpy.linspace(start_point[0], end_point[0], segment_count)
+        segment[:, 1] = numpy.linspace(start_point[1], end_point[1], segment_count)
+        return segment
+
+    segments = []
+    for i in range(pixel_array.shape[0]-1):
+        start_segment = pixel_array[i, :]
+        end_segment = pixel_array[i+1, :]
+        segments.append(make_segment(start_segment, end_segment))
+    return numpy.vstack(segments)
 
 
 #################
@@ -60,24 +149,38 @@ class ProjectionHelper(object):
     ortho-rectification usage for a sicd type object.
     """
 
-    __slots__ = ('_sicd', '_row_spacing', '_col_spacing')
+    __slots__ = ('_sicd', '_row_spacing', '_col_spacing', '_default_pixel_method')
 
-    def __init__(self, sicd, row_spacing=None, col_spacing=None):
-        """
+    def __init__(self, sicd, row_spacing=None, col_spacing=None, default_pixel_method='GEOM_MEAN'):
+        r"""
 
         Parameters
         ----------
         sicd : SICDType
             The sicd object
         row_spacing : None|float
-            The row pixel spacing. If not provided, this will default to
-            `min(sicd.Grid.Row.SS, sicd.Grid.Col.SS).`
+            The row pixel spacing. If not provided, this will default according
+            to `default_pixel_method`.
         col_spacing : None|float
-            The column pixel spacing.
+            The row pixel spacing. If not provided, this will default according
+            to `default_pixel_method`.
+        default_pixel_method : str
+            Must be one of ('MAX', 'MIN', 'MEAN', 'GEOM_MEAN'). This determines
+            the default behavior for row_spacing/col_spacing. The default value for
+            row/column spacing will be the implied function applied to the range
+            and azimuth ground resolution. Note that geometric mean is defined as
+            :math:`\sqrt(x*x + y*y)`
         """
 
         self._row_spacing = None
         self._col_spacing = None
+        default_pixel_method = default_pixel_method.upper()
+        if default_pixel_method not in _PIXEL_METHODOLOGY:
+            raise ValueError(
+                'default_pixel_method got invalid value {}. Must be one '
+                'of {}'.format(default_pixel_method, _PIXEL_METHODOLOGY))
+        self._default_pixel_method = default_pixel_method
+
         if not isinstance(sicd, SICDType):
             raise TypeError('sicd must be a SICDType instance. Got type {}'.format(type(sicd)))
         if not sicd.can_project_coordinates():
@@ -106,7 +209,8 @@ class ProjectionHelper(object):
     @row_spacing.setter
     def row_spacing(self, value):
         """
-        Set the row pixel spacing value. Will default to sicd.Grid.Row.SS.
+        Set the row pixel spacing value. Setting to None will result in a
+        default value derived from the SICD structure being used.
 
         Parameters
         ----------
@@ -118,7 +222,10 @@ class ProjectionHelper(object):
         """
 
         if value is None:
-            self._row_spacing = min(self.sicd.Grid.Row.SS, self.sicd.Grid.Col.SS)
+            if self.sicd.RadarCollection.Area is None:
+                self._row_spacing = self._get_sicd_ground_pixel()
+            else:
+                self._row_spacing = self.sicd.RadarCollection.Area.Plane.XDir.LineSpacing
         else:
             value = float(value)
             if value <= 0:
@@ -136,7 +243,8 @@ class ProjectionHelper(object):
     @col_spacing.setter
     def col_spacing(self, value):
         """
-        Set the col pixel spacing value. Will default to sicd.Grid.Col.SS.
+        Set the col pixel spacing value. Setting to NOne will result in a
+        default value derived from the SICD structure being used.
 
         Parameters
         ----------
@@ -148,12 +256,36 @@ class ProjectionHelper(object):
         """
 
         if value is None:
-            self._col_spacing = min(self.sicd.Grid.Row.SS, self.sicd.Grid.Col.SS)
+            if self.sicd.RadarCollection.Area is None:
+                self._col_spacing = self._get_sicd_ground_pixel()
+            else:
+                self._col_spacing = self.sicd.RadarCollection.Area.Plane.YDir.SampleSpacing
         else:
             value = float(value)
             if value <= 0:
                 raise ValueError('column pixel spacing must be positive.')
             self._col_spacing = float(value)
+
+    def _get_sicd_ground_pixel(self):
+        """
+        Gets the SICD ground pixel size.
+
+        Returns
+        -------
+        float
+        """
+
+        ground_row_ss, ground_col_ss = self.sicd.get_ground_resolution()
+        if self._default_pixel_method == 'MIN':
+            return min(ground_row_ss, ground_col_ss)
+        elif self._default_pixel_method == 'MAX':
+            return max(ground_row_ss, ground_col_ss)
+        elif self._default_pixel_method == 'MEAN':
+            return 0.5*(ground_row_ss + ground_col_ss)
+        elif self._default_pixel_method == 'GEOM_MEAN':
+            return float(numpy.sqrt(ground_row_ss*ground_row_ss + ground_col_ss*ground_col_ss))
+        else:
+            raise ValueError('Got unhandled default_pixel_method {}'.format(self._default_pixel_method))
 
     @staticmethod
     def _reshape(array, final_dimension):
@@ -181,7 +313,7 @@ class ProjectionHelper(object):
 
         o_shape = array.shape
 
-        if array.ndim != final_dimension:
+        if array.ndim != 2:
             array = numpy.reshape(array, (-1, final_dimension))
         return array, o_shape
 
@@ -339,7 +471,7 @@ class ProjectionHelper(object):
 
     def get_pixel_array_bounds(self, coords):
         """
-        Extract bounds of the input array, expected to have final dimension
+        Extract integer bounds of the input array, expected to have final dimension
         of size 2.
 
         Parameters
@@ -354,10 +486,10 @@ class ProjectionHelper(object):
 
         coords, o_shape = self._reshape(coords, 2)
         return numpy.array(
-            (numpy.min(coords[:, 0], axis=0),
-             numpy.max(coords[:, 0], axis=0),
-             numpy.min(coords[:, 1], axis=0),
-             numpy.max(coords[:, 1], axis=0)), dtype=numpy.float64)
+            (numpy.ceil(numpy.nanmin(coords[:, 0], axis=0)),
+             numpy.floor(numpy.nanmax(coords[:, 0], axis=0)),
+             numpy.ceil(numpy.nanmin(coords[:, 1], axis=0)),
+             numpy.floor(numpy.nanmax(coords[:, 1], axis=0))), dtype=numpy.int64)
 
 
 class PGProjection(ProjectionHelper):
@@ -369,40 +501,54 @@ class PGProjection(ProjectionHelper):
     """
 
     __slots__ = (
-        '_reference_point', '_row_vector', '_col_vector', '_normal_vector', '_reference_hae')
+        '_reference_point', '_reference_pixels', '_row_vector', '_col_vector', '_normal_vector', '_reference_hae')
 
-    def __init__(self, sicd, reference_point=None, row_vector=None, col_vector=None,
-                 row_spacing=None, col_spacing=None):
-        """
+    def __init__(self, sicd, reference_point=None, reference_pixels=None, normal_vector=None, row_vector=None,
+                 col_vector=None, row_spacing=None, col_spacing=None,
+                 default_pixel_method='GEOM_MEAN'):
+        r"""
 
         Parameters
         ----------
         sicd : SICDType
             The sicd object
         reference_point : None|numpy.ndarray
-            The reference point (origin) of the planar grid. If None, the sicd.GeoData.SCP
-            will be used.
+            The reference point (origin) of the planar grid. If None, a default
+            derived from the SICD will be used.
+        reference_pixels : None|numpy.ndarray
+            The projected pixel
+        normal_vector : None|numpy.ndarray
+            The unit normal vector of the plane.
         row_vector : None|numpy.ndarray
-            The vector defining increasing column direction. If None, then the
-            sicd.Grid.Row.UVectECF will be used.
+            The vector defining increasing column direction. If None, a default
+            derived from the SICD will be used.
         col_vector : None|numpy.ndarray
-            The vector defining increasing column direction. It is required
-            that `row_vector` and `col_vector` are orthogonal. If None, then the
-            perpendicular component of sicd.Grid.Col.UVectECF will be used.
+            The vector defining increasing column direction. If None, a default
+            derived from the SICD will be used.
         row_spacing : None|float
             The row pixel spacing.
         col_spacing : None|float
             The column pixel spacing.
+        default_pixel_method : str
+            Must be one of ('MAX', 'MIN', 'MEAN', 'GEOM_MEAN'). This determines
+            the default behavior for row_spacing/col_spacing. The default value for
+            row/column spacing will be the implied function applied to the range
+            and azimuth ground resolution. Note that geometric mean is defined as
+            :math:`\sqrt(x*x + y*y)`
         """
 
         self._reference_point = None
         self._reference_hae = None
+        self._reference_pixels = None
+        self._normal_vector = None
         self._row_vector = None
         self._col_vector = None
-        self._normal_vector = None
-        super(PGProjection, self).__init__(sicd, row_spacing=row_spacing, col_spacing=col_spacing)
-        self.set_reference_point(reference_point)
-        self.set_row_and_col_vector(row_vector, col_vector)
+        super(PGProjection, self).__init__(
+            sicd, row_spacing=row_spacing, col_spacing=col_spacing, default_pixel_method=default_pixel_method)
+        self.set_reference_point(reference_point=reference_point)
+        self.set_reference_pixels(reference_pixels=reference_pixels)
+        self.set_plane_frame(
+            normal_vector=normal_vector, row_vector=row_vector, col_vector=col_vector)
 
     @property
     def reference_point(self):
@@ -414,6 +560,15 @@ class PGProjection(ProjectionHelper):
         return self._reference_point
 
     @property
+    def reference_pixels(self):
+        # type: () -> numpy.ndarray
+        """
+        numpy.ndarray: The ortho-rectified pixel coordinates of the grid reference point.
+        """
+
+        return self._reference_pixels
+
+    @property
     def normal_vector(self):
         # type: () -> numpy.ndarray
         """
@@ -422,16 +577,7 @@ class PGProjection(ProjectionHelper):
 
         return self._normal_vector
 
-    @property
-    def reference_hae(self):
-        # type: () -> float
-        """
-        float: The reference point HAE.
-        """
-
-        return self._reference_hae
-
-    def set_reference_point(self, reference_point):
+    def set_reference_point(self, reference_point=None):
         """
         Sets the reference point, which must be provided in ECF coordinates.
 
@@ -447,15 +593,47 @@ class PGProjection(ProjectionHelper):
         """
 
         if reference_point is None:
-            reference_point = self.sicd.GeoData.SCP.ECF.get_array()
+            if self.sicd.RadarCollection.Area is None:
+                reference_point = self.sicd.GeoData.SCP.ECF.get_array()
+            else:
+                reference_point = self.sicd.RadarCollection.Area.Plane.RefPt.ECF.get_array()
 
         if not (isinstance(reference_point, numpy.ndarray) and reference_point.ndim == 1
                 and reference_point.size == 3):
             raise ValueError('reference_point must be a vector of size 3.')
         self._reference_point = reference_point
-        self._normal_vector = wgs_84_norm(reference_point)
-        llh = ecf_to_geodetic(reference_point)
-        self._reference_hae = float(llh[2])
+        # set the reference hae
+        ref_llh = ecf_to_geodetic(reference_point)
+        self._reference_hae = ref_llh[2]
+
+    def set_reference_pixels(self, reference_pixels=None):
+        """
+        Sets the reference point, which must be provided in ECF coordinates.
+
+        Parameters
+        ----------
+        reference_pixels : None|numpy.ndarray
+            The ortho-rectified pixel coordinates for the reference point (origin) of the planar grid.
+            If None, then the (0, 0) will be used.
+
+        Returns
+        -------
+        None
+        """
+
+        if reference_pixels is None:
+            if self.sicd.RadarCollection.Area is not None:
+                reference_pixels = numpy.array([
+                    self.sicd.RadarCollection.Area.Plane.RefPt.Line,
+                    self.sicd.RadarCollection.Area.Plane.RefPt.Sample],
+                    dtype='float64')
+            else:
+                reference_pixels = numpy.zeros((2, ), dtype='float64')
+
+        if not (isinstance(reference_pixels, numpy.ndarray) and reference_pixels.ndim == 1
+                and reference_pixels.size == 2):
+            raise ValueError('reference_pixels must be a vector of size 2.')
+        self._reference_pixels = reference_pixels
 
     @property
     def row_vector(self):
@@ -473,20 +651,43 @@ class PGProjection(ProjectionHelper):
 
         return self._col_vector
 
-    def set_row_and_col_vector(self, row_vector, col_vector):
+    @property
+    def reference_hae(self):
         """
-        Set the row and column vectors, in ECF coordinates. Note that the perpendicular
-        component of col_vector with respect to the row_vector will be used.
+        float: The height above the ellipsoid of the reference point.
+        """
+
+        return self._reference_hae
+
+    def set_plane_frame(self, normal_vector=None, row_vector=None, col_vector=None):
+        """
+        Set the plane unit normal, and the row and column vectors, in ECF coordinates.
+        Note that the perpendicular component of col_vector with respect to the
+        row_vector will be used.
+
+        If `normal_vector`, `row_vector`, and `col_vector` are all `None`, then
+        the normal to the Earth tangent plane at the reference point is used for
+        `normal_vector`. The `row_vector` will be defined as the perpendicular
+        component of `sicd.Grid.Row.UVectECF` to `normal_vector`. The `colummn_vector`
+        will be defined as the component of `sicd.Grid.Col.UVectECF` perpendicular
+        to both `normal_vector` and `row_vector`.
+
+        If only `normal_vector` is supplied, then the `row_vector` and `column_vector`
+        will be defined similarly as the perpendicular components of
+        `sicd.Grid.Row.UVectECF` and `sicd.Grid.Col.UVectECF`.
+
+        Otherwise, all vectors supplied will be normalized, but are required to be
+        mutually perpendicular. If only two vectors are supplied, then the third
+        will be determined.
 
         Parameters
         ----------
+        normal_vector : None|numpy.ndarray
+            The vector defining the outward unit normal in ECF coordinates.
         row_vector : None|numpy.ndarray
-            The vector defining increasing column direction. If None, then the
-            sicd.Grid.Row.UVectECF will be used.
+            The vector defining increasing column direction.
         col_vector : None|numpy.ndarray
-            The vector defining increasing column direction. It is required
-            that `row_vector` and `col_vector` are orthogonal. If None, then the
-            perpendicular component of sicd.Grid.Col.UVectECF will be used.
+            The vector defining increasing column direction.
 
         Returns
         -------
@@ -514,32 +715,87 @@ class PGProjection(ProjectionHelper):
                 vec = vec/norm  # avoid modifying row_vector def exterior to this class
             return vec
 
-        if row_vector is None:
-            row_vector = self.sicd.Grid.Row.UVectECF.get_array()
-        if col_vector is None:
-            col_vector = self.sicd.Grid.Col.UVectECF.get_array()
+        def check_perp(vec1, vec2, name1, name2, tolerance=1e-6):
+            if abs(vec1.dot(vec2)) > tolerance:
+                raise ValueError('{} vector and {} vector are not perpendicular'.format(name1, name2))
 
-        # make perpendicular to the plane normal vector
-        self._row_vector = normalize(row_vector, 'row', perp=self.normal_vector)
-        # make perpendicular to the plane normal vector and row_vector
-        self._col_vector = normalize(col_vector, 'column', perp=(self.normal_vector, self._row_vector))
+        if self._reference_point is None:
+            raise ValueError('This requires that reference point is previously set.')
+
+        if normal_vector is None and row_vector is None and col_vector is None:
+            if self.sicd.RadarCollection.Area is None:
+                self._normal_vector = wgs_84_norm(self.reference_point)
+                self._row_vector = normalize(
+                    self.sicd.Grid.Row.UVectECF.get_array(), 'row', perp=self.normal_vector)
+                self._col_vector = normalize(
+                    self.sicd.Grid.Col.UVectECF.get_array(), 'column', perp=(self.normal_vector, self.row_vector))
+            else:
+                self._row_vector = self.sicd.RadarCollection.Area.Plane.XDir.UVectECF.get_array()
+                self._col_vector = normalize(
+                    self.sicd.RadarCollection.Area.Plane.YDir.UVectECF.get_array(), 'col', perp=self._row_vector)
+                self._normal_vector = numpy.cross(self._row_vector, self._col_vector)
+        elif normal_vector is not None and row_vector is None and col_vector is None:
+            self._normal_vector = normalize(normal_vector, 'normal')
+            self._row_vector = normalize(
+                self.sicd.Grid.Row.UVectECF.get_array(), 'row', perp=self.normal_vector)
+            self._col_vector = normalize(
+                self.sicd.Grid.Col.UVectECF.get_array(), 'column', perp=(self.normal_vector, self.row_vector))
+        elif normal_vector is None:
+            if row_vector is None or col_vector is None:
+                raise ValueError('normal_vector is not defined, so both row_vector and col_vector must be.')
+            row_vector = normalize(row_vector, 'row')
+            col_vector = normalize(col_vector, 'col')
+            check_perp(row_vector, col_vector, 'row', 'col')
+            self._row_vector = row_vector
+            self._col_vector = col_vector
+            self._normal_vector = numpy.cross(row_vector, col_vector)
+        elif col_vector is None:
+            if row_vector is None:
+                raise ValueError('col_vector is not defined, so both normal_vector and row_vector must be.')
+            normal_vector = normalize(normal_vector, 'normal')
+            row_vector =  normalize(row_vector, 'row')
+            check_perp(normal_vector, row_vector, 'normal', 'row')
+            self._normal_vector = normal_vector
+            self._row_vector = row_vector
+            self._col_vector = numpy.cross(self.normal_vector, self.row_vector)
+        elif row_vector is None:
+            normal_vector = normalize(normal_vector, 'normal')
+            col_vector =  normalize(col_vector, 'col')
+            check_perp(normal_vector, col_vector, 'normal', 'col')
+            self._normal_vector = normal_vector
+            self._col_vector = col_vector
+            self._row_vector = numpy.cross(self.col_vector, self.normal_vector)
+        else:
+            normal_vector = normalize(normal_vector, 'normal')
+            row_vector = normalize(row_vector, 'row')
+            col_vector =  normalize(col_vector, 'col')
+            check_perp(normal_vector, row_vector, 'normal', 'row')
+            check_perp(normal_vector, col_vector, 'normal', 'col')
+            check_perp(row_vector, col_vector, 'row', 'col')
+            self._normal_vector = normal_vector
+            self._row_vector = row_vector
+            self._col_vector = col_vector
+        # check for outward unit norm
+        if numpy.dot(self.normal_vector, self.reference_point) < 0:
+            logging.warning(
+                'The normal vector appears to be outward pointing, so reversing.')
+            self._normal_vector *= -1
 
     def ecf_to_ortho(self, coords):
         coords, o_shape = self._reshape(coords, 3)
         diff = coords - self.reference_point
         if len(o_shape) == 1:
             out = numpy.zeros((2, ), dtype=numpy.float64)
-            out[0] = numpy.sum(diff*self.row_vector)/self.row_spacing
-            out[1] = numpy.sum(diff*self.col_vector)/self.col_spacing
+            out[0] = self._reference_pixels[0] + numpy.sum(diff*self.row_vector)/self.row_spacing
+            out[1] = self._reference_pixels[1] + numpy.sum(diff*self.col_vector)/self.col_spacing
         else:
             out = numpy.zeros((coords.shape[0], 2), dtype=numpy.float64)
-            out[:, 0] = numpy.sum(diff*self.row_vector, axis=1)/self.row_spacing
-            out[:, 1] = numpy.sum(diff*self.col_vector, axis=1)/self.col_spacing
+            out[:, 0] = self._reference_pixels[0] + numpy.sum(diff*self.row_vector, axis=1)/self.row_spacing
+            out[:, 1] = self._reference_pixels[1] + numpy.sum(diff*self.col_vector, axis=1)/self.col_spacing
             out = numpy.reshape(out, o_shape[:-1] + (2, ))
         return out
 
     def ecf_to_pixel(self, coords):
-        # ground to image
         pixel, _, _ = self.sicd.project_ground_to_image(coords)
         return pixel
 
@@ -573,8 +829,8 @@ class PGProjection(ProjectionHelper):
 
     def ortho_to_ecf(self, ortho_coords):
         ortho_coords, o_shape = self._reshape(ortho_coords, 2)
-        xs = ortho_coords[:, 0]*self.row_spacing
-        ys = ortho_coords[:, 1]*self.col_spacing
+        xs = (ortho_coords[:, 0] - self._reference_pixels[0])*self.row_spacing
+        ys = (ortho_coords[:, 1] - self._reference_pixels[1])*self.col_spacing
         if xs.ndim == 0:
             coords = self.reference_point + xs*self.row_vector + ys*self.col_vector
         else:
@@ -591,7 +847,9 @@ class PGProjection(ProjectionHelper):
         return self.ecf_to_ortho(self.pixel_to_ecf(pixel_coords))
 
     def pixel_to_ecf(self, pixel_coords):
-        return self.sicd.project_image_to_ground(pixel_coords, projection_type='PLANE')
+        return self.sicd.project_image_to_ground(
+            pixel_coords, projection_type='PLANE',
+            gref=self.reference_point, ugpn=self.normal_vector)
 
 
 ################
@@ -606,7 +864,7 @@ class OrthorectificationHelper(object):
     __slots__ = (
         '_reader', '_index', '_sicd', '_proj_helper', '_out_dtype', '_complex_valued',
         '_pad_value', '_apply_radiometric', '_subtract_radiometric_noise',
-        '_rad_poly', '_noise_poly')
+        '_rad_poly', '_noise_poly', '_default_physical_bounds')
 
     def __init__(self, reader, index=0, proj_helper=None, complex_valued=False,
                  pad_value=None, apply_radiometric=None, subtract_radiometric_noise=False):
@@ -643,6 +901,7 @@ class OrthorectificationHelper(object):
         self._subtract_radiometric_noise = None
         self._rad_poly = None  # type: [None, Poly2DType]
         self._noise_poly = None  # type: [None, Poly2DType]
+        self._default_physical_bounds = None
 
         self._pad_value = pad_value
         self._complex_valued = complex_valued
@@ -652,8 +911,10 @@ class OrthorectificationHelper(object):
             self._out_dtype = numpy.dtype('float32')
         if not isinstance(reader, BaseReader):
             raise TypeError('Got unexpected type {} for reader'.format(type(reader)))
-        if not reader.is_sicd_type:
-            raise ValueError('Reader is required to have is_sicd_type property value equals True')
+        if reader.reader_type != "SICD":
+            raise ValueError(
+                'Reader is required to have property reader_type="SICD", got {} '
+                'for type {}'.format(reader.reader_type, type(reader)))
         self._reader = reader
         self.apply_radiometric = apply_radiometric
         self.subtract_radiometric_noise = subtract_radiometric_noise
@@ -735,11 +996,22 @@ class OrthorectificationHelper(object):
         self._is_radiometric_valid()
         self._is_radiometric_noise_valid()
 
+        default_ortho_bounds = None
         if proj_helper is None:
-            proj_helper = PGProjection(self._sicd)
+            proj_helper = PGProjection(self.sicd)
+            if self.sicd.RadarCollection is not None and self.sicd.RadarCollection.Area is not None \
+                    and self.sicd.RadarCollection.Area.Plane is not None:
+                plane = self.sicd.RadarCollection.Area.Plane
+                default_ortho_bounds = numpy.array([
+                    plane.XDir.FirstLine, plane.XDir.FirstLine+plane.XDir.NumLines,
+                    plane.YDir.FirstSample, plane.YDir.FirstSample+plane.YDir.NumSamples], dtype=numpy.uint32)
+
         if not isinstance(proj_helper, ProjectionHelper):
             raise TypeError('Got unexpected type {} for proj_helper'.format(proj_helper))
         self._proj_helper = proj_helper
+        if default_ortho_bounds is not None:
+            _, ortho_rectangle = self.bounds_to_rectangle(default_ortho_bounds)
+            self._default_physical_bounds = self.proj_helper.ortho_to_ecf(ortho_rectangle)
 
     @property
     def apply_radiometric(self):
@@ -877,8 +1149,14 @@ class OrthorectificationHelper(object):
         numpy.ndarray
             Of the form `[min row, max row, min column, max column]`.
         """
+
+        if self._default_physical_bounds is not None:
+            ortho_rectangle = self.proj_helper.ecf_to_ortho(self._default_physical_bounds)
+            return self.proj_helper.get_pixel_array_bounds(ortho_rectangle)
+
         full_coords = self.sicd.ImageData.get_full_vertex_data()
-        return self.get_orthorectification_bounds_from_pixel_object(full_coords)
+        full_line = _linear_fill(full_coords, fill_interval=1)
+        return self.get_orthorectification_bounds_from_pixel_object(full_line)
 
     def get_valid_ortho_bounds(self):
         """
@@ -895,18 +1173,20 @@ class OrthorectificationHelper(object):
             Of the form `[min row, max row, min column, max column]`.
         """
 
+        if self._default_physical_bounds is not None:
+            ortho_rectangle = self.proj_helper.ecf_to_ortho(self._default_physical_bounds)
+            return self.proj_helper.get_pixel_array_bounds(ortho_rectangle)
+
         valid_coords = self.sicd.ImageData.get_valid_vertex_data()
         if valid_coords is None:
             valid_coords = self.sicd.ImageData.get_full_vertex_data()
-        return self.get_orthorectification_bounds_from_pixel_object(valid_coords)
+        valid_line = _linear_fill(valid_coords, fill_interval=1)
+        return self.get_orthorectification_bounds_from_pixel_object(valid_line)
 
     def get_orthorectification_bounds_from_pixel_object(self, coordinates):
         """
         Determine the ortho-rectified (coordinate-system aligned) rectangular bounding
         region which contains the provided coordinates in pixel space.
-
-        .. Note: This assumes that the coordinate transforms are convex transformations,
-            which **should** be safe for SAR associated transforms.
 
         Parameters
         ----------
@@ -925,17 +1205,16 @@ class OrthorectificationHelper(object):
             coordinates = numpy.array(
                 [[pixel_bounds[0], pixel_bounds[1]],
                  [pixel_bounds[siz], pixel_bounds[1]],
-                 [pixel_bounds[siz], pixel_bounds[siz+1]],
-                 [pixel_bounds[0], pixel_bounds[siz+1]]], dtype=numpy.float64)
-        ortho = self.proj_helper.pixel_to_ortho(coordinates)
+                 [pixel_bounds[siz], pixel_bounds[siz]],
+                 [pixel_bounds[0], pixel_bounds[siz]]], dtype=numpy.float64)
+        filled_coordinates = _linear_fill(coordinates, fill_interval=1)
+        ortho = self.proj_helper.pixel_to_ortho(filled_coordinates)
         return self.proj_helper.get_pixel_array_bounds(ortho)
 
     def get_orthorectification_bounds_from_latlon_object(self, coordinates):
         """
         Determine the ortho-rectified (coordinate-system aligned) rectangular bounding
         region which contains the provided coordinates in lat/lon space.
-
-        .. Note: This neglects the non-convexity of lat/lon coordinate space.
 
         Parameters
         ----------
@@ -981,7 +1260,7 @@ class OrthorectificationHelper(object):
         return self.proj_helper.get_pixel_array_bounds(ortho)
 
     @staticmethod
-    def _validate_bounds(bounds):
+    def validate_bounds(bounds):
         """
         Validate a pixel type bounds array.
 
@@ -1057,17 +1336,21 @@ class OrthorectificationHelper(object):
         numpy.ndarray
         """
 
-        mask = ((pixel_rows >= row_array[0]) & (pixel_rows < row_array[-1]) &
+        mask = (numpy.isfinite(pixel_rows) &
+                numpy.isfinite(pixel_cols) &
+                (pixel_rows >= row_array[0]) & (pixel_rows < row_array[-1]) &
                 (pixel_cols >= col_array[0]) & (pixel_cols < col_array[-1]))
         return mask
 
-    def _bounds_to_rectangle(self, bounds):
+    def bounds_to_rectangle(self, bounds):
         """
         From a bounds style array, construct the four corner coordinate array.
+        This follows the SICD convention of going CLOCKWISE around the corners.
 
         Parameters
         ----------
         bounds : numpy.ndarray|list|tuple
+            Of the form `(row min, row max, col min, col max)`.
 
         Returns
         -------
@@ -1075,18 +1358,18 @@ class OrthorectificationHelper(object):
             The (integer valued) bounds and rectangular coordinates.
         """
 
-        bounds = self._validate_bounds(bounds)
+        bounds = self.validate_bounds(bounds)
         coords = numpy.zeros((4, 2), dtype=numpy.int32)
-        coords[0, :] = (bounds[0], bounds[2])
-        coords[1, :] = (bounds[1], bounds[2])
-        coords[2, :] = (bounds[1], bounds[3])
-        coords[3, :] = (bounds[0], bounds[3])
+        coords[0, :] = (bounds[0], bounds[2])  # row min, col min
+        coords[1, :] = (bounds[0], bounds[3])  # row min, col max
+        coords[2, :] = (bounds[1], bounds[3])  # row max, col max
+        coords[3, :] = (bounds[1], bounds[2])  # row max, col min
         return bounds, coords
 
-    def _extract_bounds(self, bounds):
+    def extract_pixel_bounds(self, bounds):
         """
         Validate the bounds array of orthorectified pixel coordinates, and determine
-        the required bounds in reader pixel coordinates.
+        the required bounds in reader pixel coordinates. If the
 
         Parameters
         ----------
@@ -1098,10 +1381,11 @@ class OrthorectificationHelper(object):
             The integer valued orthorectified and reader pixel coordinate bounds.
         """
 
-        bounds, coords = self._bounds_to_rectangle(bounds)
-        pixel_coords = self.proj_helper.ortho_to_pixel(coords)
+        bounds, coords = self.bounds_to_rectangle(bounds)
+        filled_coords = _linear_fill(coords, fill_interval=1)
+        pixel_coords = self.proj_helper.ortho_to_pixel(filled_coords)
         pixel_bounds = self.proj_helper.get_pixel_array_bounds(pixel_coords)
-        return bounds, self._validate_bounds(pixel_bounds)
+        return bounds, self.validate_bounds(pixel_bounds)
 
     def _initialize_workspace(self, ortho_bounds, final_dimension=0):
         """
@@ -1131,7 +1415,7 @@ class OrthorectificationHelper(object):
         return numpy.zeros(out_shape, dtype=self.out_dtype) if self._pad_value is None else \
             numpy.full(out_shape, self._pad_value, dtype=self.out_dtype)
 
-    def _get_real_pixel_limits_and_bounds(self, pixel_bounds):
+    def get_real_pixel_bounds(self, pixel_bounds):
         """
         Fetch the real pixel limit from the nominal pixel limits - this just
         factors in the image reader extent.
@@ -1142,14 +1426,22 @@ class OrthorectificationHelper(object):
 
         Returns
         -------
-        (tuple, numpy.ndarray)
+        numpy.ndarray
         """
 
+        if pixel_bounds[0] > pixel_bounds[1] or pixel_bounds[2] > pixel_bounds[3]:
+            raise ValueError('Got unexpected and invalid pixel_bounds array {}'.format(pixel_bounds))
+
         pixel_limits = self.reader.get_data_size_as_tuple()[self.index]
+        if (pixel_bounds[0] >= pixel_limits[0]) or (pixel_bounds[1] < 0) or \
+                (pixel_bounds[2] >= pixel_limits[1]) or (pixel_bounds[3] < 0):
+            # this entirely misses the whole region
+            return numpy.array([0, 0, 0, 0], dtype=numpy.int32)
+
         real_pix_bounds = numpy.array([
             max(0, pixel_bounds[0]), min(pixel_limits[0], pixel_bounds[1]),
             max(0, pixel_bounds[2]), min(pixel_limits[1], pixel_bounds[3])], dtype=numpy.int32)
-        return pixel_limits, real_pix_bounds
+        return real_pix_bounds
 
     def _apply_radiometric_params(self, pixel_rows, pixel_cols, value_array):
         """
@@ -1288,6 +1580,11 @@ class OrthorectificationHelper(object):
 
         # validate our inputs
         value_array = self._validate_row_col_values(row_array, col_array, value_array, value_is_flat=False)
+        if value_array.size == 0:
+            if value_array.ndim == 3:
+                return self._initialize_workspace(ortho_bounds, final_dimension=value_array.shape[2])
+            else:
+                return self._initialize_workspace(ortho_bounds)
         if value_array.ndim == 2:
             return self._get_orthrectified_from_array_flat(ortho_bounds, row_array, col_array, value_array)
         else:  # it must be three dimensional, as checked by _validate_row_col_values()
@@ -1315,9 +1612,9 @@ class OrthorectificationHelper(object):
         numpy.ndarray
         """
 
-        ortho_bounds, nominal_pixel_bounds = self._extract_bounds(bounds)
+        ortho_bounds, nominal_pixel_bounds = self.extract_pixel_bounds(bounds)
         # extract the values - ensure that things are within proper image bounds
-        pixel_limits, pixel_bounds = self._get_real_pixel_limits_and_bounds(nominal_pixel_bounds)
+        pixel_bounds = self.get_real_pixel_bounds(nominal_pixel_bounds)
         pixel_array = self.reader[
             pixel_bounds[0]:pixel_bounds[1], pixel_bounds[2]:pixel_bounds[3], self.index]
         row_arr = numpy.arange(pixel_bounds[0], pixel_bounds[1])
@@ -1339,16 +1636,13 @@ class OrthorectificationHelper(object):
         numpy.ndarray
         """
 
-        pixel_bounds, pixel_rect = self._bounds_to_rectangle(pixel_bounds)
+        pixel_bounds, pixel_rect = self.bounds_to_rectangle(pixel_bounds)
         return self.get_orthorectified_for_pixel_object(pixel_rect)
 
     def get_orthorectified_for_pixel_object(self, coordinates):
         """
         Determine the ortho-rectified rectangular array values, which will bound
         the given object - with coordinates expressed in pixel space.
-
-        .. Note: This assumes that the coordinate transforms are convex transformations,
-            which should be safe for basic SAR associated transforms.
 
         Parameters
         ----------
@@ -1367,9 +1661,6 @@ class OrthorectificationHelper(object):
         """
         Determine the ortho-rectified rectangular array values, which will bound
         the given object - with coordinates expressed in lat/lon space.
-
-        .. Note: This assumes that the coordinate transforms are convex transformations,
-            which should be safe for basic SAR associated transforms.
 
         Parameters
         ----------
@@ -1393,7 +1684,7 @@ class OrthorectificationHelper(object):
         Parameters
         ----------
         ortho_bounds : numpy.ndarray
-            Determines the orthorectified bounds reguon, of the form
+            Determines the orthorectified bounds region, of the form
             `(min row, max row, min column, max column)`.
         row_array : numpy.ndarray
             The rows of the pixel array. Must be one-dimensional, monotonically
@@ -1430,7 +1721,7 @@ class OrthorectificationHelper(object):
         Parameters
         ----------
         ortho_bounds : numpy.ndarray
-            Determines the orthorectified bounds reguon, of the form
+            Determines the orthorectified bounds region, of the form
             `(min row, max row, min column, max column)`.
         row_array : numpy.ndarray
             The rows of the pixel array. Must be one-dimensional, monotonically
@@ -1453,6 +1744,11 @@ class OrthorectificationHelper(object):
 class NearestNeighborMethod(OrthorectificationHelper):
     """
     Nearest neighbor ortho-rectification method.
+
+    .. warning::
+        Modification of the proj_helper parameters when the default full image
+        bounds have been defained (i.e. sicd.RadarCollection.Area is defined) may
+        result in unintended results.
     """
 
     def __init__(self, reader, index=0, proj_helper=None, complex_valued=False,
@@ -1494,18 +1790,24 @@ class NearestNeighborMethod(OrthorectificationHelper):
             ortho_bounds, row_array, col_array, value_array)
         # potentially apply the radiometric parameters to the value array
         value_array = self._apply_radiometric_params(row_array, col_array, value_array)
-        # determine the in bounds points
-        mask = self._get_mask(pixel_rows, pixel_cols, row_array, col_array)
-        # determine the nearest neighbors for our row/column indices
-        row_inds = numpy.digitize(pixel_rows[mask], row_array)
-        col_inds = numpy.digitize(pixel_cols[mask], col_array)
-        ortho_array[mask] = value_array[row_inds, col_inds]
+        if value_array.size > 0:
+            # determine the in bounds points
+            mask = self._get_mask(pixel_rows, pixel_cols, row_array, col_array)
+            # determine the nearest neighbors for our row/column indices
+            row_inds = numpy.digitize(pixel_rows[mask], row_array)
+            col_inds = numpy.digitize(pixel_cols[mask], col_array)
+            ortho_array[mask] = value_array[row_inds, col_inds]
         return ortho_array
 
 
 class BivariateSplineMethod(OrthorectificationHelper):
     """
     Bivariate spline interpolation ortho-rectification method.
+
+    .. warning::
+        Modification of the proj_helper parameters when the default full image
+        bounds have been defained (i.e. sicd.RadarCollection.Area is defined) may
+        result in unintended results.
     """
 
     __slots__ = ('_row_order', '_col_order')
@@ -1589,11 +1891,796 @@ class BivariateSplineMethod(OrthorectificationHelper):
             ortho_bounds, row_array, col_array, value_array)
         value_array = self._apply_radiometric_params(row_array, col_array, value_array)
 
-        # set up our spline
-        sp = RectBivariateSpline(row_array, col_array, value_array, kx=self.row_order, ky=self.col_order, s=0)
-        # determine the in bounds points
-        mask = self._get_mask(pixel_rows, pixel_cols, row_array, col_array)
-        result = sp.ev(pixel_rows[mask], pixel_cols[mask])
-        # potentially apply the radiometric parameters
-        ortho_array[mask] = result
+        if value_array.size > 0:
+            # set up our spline
+            sp = RectBivariateSpline(row_array, col_array, value_array, kx=self.row_order, ky=self.col_order, s=0)
+            # determine the in bounds points
+            mask = self._get_mask(pixel_rows, pixel_cols, row_array, col_array)
+            result = sp.ev(pixel_rows[mask], pixel_cols[mask])
+            # potentially apply the radiometric parameters
+            ortho_array[mask] = result
         return ortho_array
+
+
+#################
+# Ortho-rectification generator/iterator
+
+def _get_fetch_block_size(start_element, stop_element, block_size_in_bytes, bands=1):
+    if stop_element == start_element:
+        return None
+    if block_size_in_bytes is None:
+        return None
+
+    full_size = float(abs(stop_element - start_element))
+    return max(1, int_func(numpy.ceil(block_size_in_bytes / float(bands*8*full_size))))
+
+
+def _extract_blocks(the_range, index_block_size):
+    # type: (Tuple[int, int, int], int) -> (List[Tuple[int, int, int]], List[Tuple[int, int]])
+    """
+    Convert the single range definition into a series of range definitions in
+    keeping with fetching of the appropriate block sizes.
+
+    Parameters
+    ----------
+    the_range : Tuple[int, int, int]
+        The input (off processing axis) range.
+    index_block_size : None|int|float
+        The size of blocks (number of indices).
+
+    Returns
+    -------
+    List[Tuple[int, int, int]], List[Tuple[int, int]]
+        The sequence of range definitions `(start index, stop index, step)`
+        relative to the overall image, and the sequence of start/stop indices
+        for positioning of the given range relative to the original range.
+    """
+
+    entries = numpy.arange(the_range[0], the_range[1], the_range[2], dtype=numpy.int64)
+    if index_block_size is None:
+        return [the_range, ], [(0, entries.size), ]
+
+    # how many blocks?
+    block_count = int_func(numpy.ceil(entries.size/float(index_block_size)))
+    if index_block_size == 1:
+        return [the_range, ], [(0, entries.size), ]
+
+    # workspace for what the blocks are
+    out1 = []
+    out2 = []
+    start_ind = 0
+    for i in range(block_count):
+        end_ind = start_ind+index_block_size
+        if end_ind < entries.size:
+            block1 = (int_func(entries[start_ind]), int_func(entries[end_ind]), the_range[2])
+            block2 = (start_ind, end_ind)
+        else:
+            block1 = (int_func(entries[start_ind]), the_range[1], the_range[2])
+            block2 = (start_ind, entries.size)
+        out1.append(block1)
+        out2.append(block2)
+        start_ind = end_ind
+    return out1, out2
+
+
+def _get_data_mean_magnitude(bounds, reader, index, block_size_in_bytes):
+    """
+    Gets the mean magnitude in the region defined by bounds.
+
+    Parameters
+    ----------
+    bounds : numpy.ndarray
+        Of the form `(row_start, row_end, col_start, col_end)`.
+    reader : BaseReader
+        The data reader.
+    index : int
+        The reader index to use.
+    block_size_in_bytes : int|float
+        The block size in bytes.
+
+    Returns
+    -------
+    float
+    """
+
+    # Extract the mean of the data magnitude - for global remap usage
+    logging.info('Calculating mean over the block ({}:{}, {}:{}), this may be time consuming'.format(*bounds))
+    mean_block_size = _get_fetch_block_size(bounds[0], bounds[1], block_size_in_bytes)
+    mean_column_blocks, _ = _extract_blocks((bounds[2], bounds[3], 1), mean_block_size)
+    mean_total = 0.0
+    mean_count = 0
+    for this_column_range in mean_column_blocks:
+        data = numpy.abs(reader[
+                         bounds[0]:bounds[1],
+                         this_column_range[0]:this_column_range[1],
+                         index])
+        mask = (data > 0) & numpy.isfinite(data)
+        mean_total += numpy.sum(data[mask])
+        mean_count += numpy.sum(mask)
+    return float(mean_total / mean_count)
+
+
+class FullResolutionFetcher(object):
+    """
+    This is a base class for provided a simple API for processing schemes where
+    full resolution is required along the processing dimension, so sub-sampling
+    along the processing dimension does not decrease the amount of data which
+    must be fetched.
+    """
+
+    __slots__ = (
+        '_reader', '_index', '_sicd', '_dimension', '_data_size', '_block_size')
+
+    def __init__(self, reader, dimension=0, index=0, block_size=10):
+        """
+
+        Parameters
+        ----------
+        reader : str|BaseReader
+            Input file path or reader object, which must be of sicd type.
+        dimension : int
+            The dimension over which to split the sub-aperture.
+        index : int
+            The sicd index to use.
+        block_size : None|int|float
+            The approximate processing block size to fetch, given in MB. The
+            minimum value for use here will be 0.25. `None` represents processing
+            as a single block.
+        """
+
+        self._index = None # set explicitly
+        self._sicd = None  # set with index setter
+        self._dimension = None # set explicitly
+        self._data_size = None  # set with index setter
+        self._block_size = None # set explicitly
+
+        # validate the reader
+        if isinstance(reader, string_types):
+            reader = open_complex(reader)
+        if not isinstance(reader, BaseReader):
+            raise TypeError('reader is required to be a path name for a sicd-type image, '
+                            'or an instance of a reader object.')
+        if reader.reader_type != "SICD":
+            raise ValueError(
+                'Reader is required to have property reader_type="SICD", got {} '
+                'for type {}'.format(reader.reader_type, type(reader)))
+        self._reader = reader
+        # set the other properties
+        self.dimension = dimension
+        self.index = index
+        self.block_size = block_size
+
+    @property
+    def reader(self):
+        # type: () -> BaseReader
+        """
+        BaseReader: The reader instance.
+        """
+
+        return self._reader
+
+    @property
+    def dimension(self):
+        # type: () -> int
+        """
+        int: The dimension along which to perform the color subaperture split.
+        """
+
+        return self._dimension
+
+    @dimension.setter
+    def dimension(self, value):
+        value = int_func(value)
+        if value not in [0, 1]:
+            raise ValueError('dimension must be 0 or 1, got {}'.format(value))
+        self._dimension = value
+
+    @property
+    def data_size(self):
+        # type: () -> Tuple[int, int]
+        """
+        Tuple[int, int]: The data size for the reader at the given index.
+        """
+
+        return self._data_size
+
+    @property
+    def index(self):
+        # type: () -> int
+        """
+        int: The index of the reader.
+        """
+
+        return self._index
+
+    @index.setter
+    def index(self, value):
+        self._set_index(value)
+
+    def _set_index(self, value):
+        value = int_func(value)
+        if value < 0:
+            raise ValueError('The index must be a non-negative integer, got {}'.format(value))
+
+        sicds = self.reader.get_sicds_as_tuple()
+        if value >= len(sicds):
+            raise ValueError('The index must be less than the sicd count.')
+        self._index = value
+        self._sicd = sicds[value]
+        self._data_size = self.reader.get_data_size_as_tuple()[value]
+
+    @property
+    def block_size(self):
+        # type: () -> float
+        """
+        None|float: The approximate processing block size in MB, where `None`
+        represents processing in a single block.
+        """
+
+        return self._block_size
+
+    @block_size.setter
+    def block_size(self, value):
+        if value is None:
+            self._block_size = None
+        else:
+            value = float(value)
+            if value < 0.25:
+                value = 0.25
+            self._block_size = value
+
+    @property
+    def block_size_in_bytes(self):
+        # type: () -> Union[None, int]
+        """
+        None|int: The approximate processing block size in bytes.
+        """
+
+        return None if self._block_size is None else int_func(self._block_size*(2**20))
+
+    @property
+    def sicd(self):
+        # type: () -> SICDType
+        """
+        SICDType: The sicd structure.
+        """
+
+        return self._sicd
+
+    def _parse_slicing(self, item):
+        # type: (Union[None, int, slice, tuple]) -> Tuple[Tuple[int, int, int], Tuple[int, int, int], Any]
+
+        def parse(entry, dimension):
+            bound = self.data_size[dimension]
+            if entry is None:
+                return 0, bound, 1
+            elif isinstance(entry, integer_types):
+                entry = validate_slice_int(entry, bound)
+                return entry, entry+1, 1
+            elif isinstance(entry, slice):
+                entry = validate_slice(entry, bound)
+                return entry.start, entry.stop, entry.step
+            else:
+                raise TypeError('No support for slicing using type {}'.format(type(entry)))
+
+        # this input is assumed to come from slice parsing
+        if isinstance(item, tuple):
+            if len(item) > 3:
+                raise ValueError(
+                    'Received slice argument {}. We cannot slice '
+                    'on more than two dimensions.'.format(item))
+            elif len(item) == 3:
+                return parse(item[0], 0), parse(item[1], 1), item[2]
+            elif len(item) == 2:
+                return parse(item[0], 0), parse(item[1], 1), None
+            elif len(item) == 1:
+                return parse(item[0], 0), parse(None, 1), None
+            else:
+                return parse(None, 0), parse(None, 1), None
+        elif isinstance(item, slice):
+            return parse(item, 0), parse(None, 1), None
+        elif isinstance(item, integer_types):
+            return parse(item, 0), parse(None, 1), None
+        else:
+            raise TypeError('Slicing using type {} is unsupported'.format(type(item)))
+
+    def get_fetch_block_size(self, start_element, stop_element):
+        """
+        Gets the fetch block size for the given full resolution section.
+        This assumes that the fetched data will be 8 bytes per pixel, in
+        accordance with single band complex64 data.
+
+        Parameters
+        ----------
+        start_element : int
+        stop_element : int
+
+        Returns
+        -------
+        int
+        """
+
+        return _get_fetch_block_size(start_element, stop_element, self.block_size_in_bytes, bands=1)
+
+    @staticmethod
+    def extract_blocks(the_range, index_block_size):
+        # type: (Tuple[int, int, int], Union[None, int, float]) -> (List[Tuple[int, int, int]], List[Tuple[int, int]])
+        """
+        Convert the single range definition into a series of range definitions in
+        keeping with fetching of the appropriate block sizes.
+
+        Parameters
+        ----------
+        the_range : Tuple[int, int, int]
+            The input (off processing axis) range.
+        index_block_size : None|int|float
+            The size of blocks (number of indices).
+
+        Returns
+        -------
+        List[Tuple[int, int, int]], List[Tuple[int, int]]
+            The sequence of range definitions `(start index, stop index, step)`
+            relative to the overall image, and the sequence of start/stop indices
+            for positioning of the given range relative to the original range.
+
+        """
+
+        return _extract_blocks(the_range, index_block_size)
+
+    def get_data_mean_magnitude(self, bounds):
+        """
+        Gets the mean magnitude in the region defined by bounds.
+
+        Parameters
+        ----------
+        bounds : numpy.ndarray
+            Of the form `(row_start, row_end, col_start, col_end)`.
+
+        Returns
+        -------
+        float
+        """
+
+        return _get_data_mean_magnitude(bounds, self.reader, self.index, self.block_size_in_bytes)
+
+    def _full_row_resolution(self, row_range, col_range):
+        # type: (Tuple[int, int, int], Tuple[int, int, int]) -> numpy.ndarray
+        """
+        Perform the full row resolution data, with any appropriate calculations.
+
+        Parameters
+        ----------
+        row_range : Tuple[int, int, int]
+        col_range : Tuple[int, int, int]
+
+        Returns
+        -------
+        numpy.ndarray
+        """
+
+        # fetch the data and perform the csi calculation
+        if row_range[2] not in [1, -1]:
+            raise ValueError('The step for row_range must be +/- 1, for full row resolution data.')
+        if row_range[1] == -1:
+            data = self.reader[
+                   row_range[0]::row_range[2],
+                   col_range[0]:col_range[1]:col_range[2],
+                   self.index]
+        else:
+            data = self.reader[
+                   row_range[0]:row_range[1]:row_range[2],
+                   col_range[0]:col_range[1]:col_range[2],
+                   self.index]
+
+        if data.ndim < 2:
+            data = numpy.reshape(data, (-1, 1))
+        # handle nonsense data with zeros
+        data[~numpy.isfinite(data)] = 0
+        return data
+
+    def _full_column_resolution(self, row_range, col_range):
+        # type: (Tuple[int, int, int], Tuple[int, int, int]) -> numpy.ndarray
+        """
+        Perform the full column resolution data, with any appropriate calculations.
+
+        Parameters
+        ----------
+        row_range : Tuple[int, int, int]
+        col_range : Tuple[int, int, int]
+
+        Returns
+        -------
+        numpy.ndarray
+        """
+
+        # fetch the data and perform the csi calculation
+        if col_range[2] not in [1, -1]:
+            raise ValueError('The step for col_range must be +/- 1, for full col resolution data.')
+        if col_range[1] == -1:
+            data = self.reader[
+                   row_range[0]:row_range[1]:row_range[2],
+                   col_range[0]::col_range[2],
+                   self.index]
+        else:
+            data = self.reader[
+                   row_range[0]:row_range[1]:row_range[2],
+                   col_range[0]:col_range[1]:col_range[2],
+                   self.index]
+
+        if data.ndim < 2:
+            data = numpy.reshape(data, (1, -1))
+        # handle nonsense data with zeros
+        data[~numpy.isfinite(data)] = 0
+        return data
+
+    def _prepare_output(self, row_range, col_range):
+        """
+        Prepare the output workspace for :func:`__getitem__`.
+
+        Parameters
+        ----------
+        row_range
+        col_range
+
+        Returns
+        -------
+        numpy.ndarray
+        """
+
+        row_count = int_func((row_range[1] - row_range[0]) / float(row_range[2]))
+        col_count = int_func((col_range[1] - col_range[0]) / float(col_range[2]))
+        out_size = (row_count, col_count)
+        return numpy.zeros(out_size, dtype=numpy.complex64)
+
+    def __getitem__(self, item):
+        """
+        Fetches the processed data based on the input slice.
+
+        Parameters
+        ----------
+        item
+
+        Returns
+        -------
+        numpy.ndarray
+        """
+
+        # parse the slicing to ensure consistent structure
+        row_range, col_range, _ = self._parse_slicing(item)
+        return self.reader[
+               row_range[0]:row_range[1]:row_range[2],
+               col_range[0]:col_range[1]:col_range[2],
+               self.index]
+
+
+class OrthorectificationIterator(object):
+    """
+    This provides a generator for an Orthorectification process on a given
+    reader/index/(pixel) bounds.
+    """
+
+    __slots__ = (
+        '_calculator', '_ortho_helper', '_pixel_bounds', '_ortho_bounds',
+        '_this_index', '_iteration_blocks', '_the_mean', '_apply_remap',
+        '_dmin', '_mmult')
+
+    def __init__(
+            self, ortho_helper, calculator=None, bounds=None, apply_remap=True,
+            dmin=30, mmult=40):
+        """
+
+        Parameters
+        ----------
+        ortho_helper : OrthorectificationHelper
+            The ortho-rectification helper.
+        calculator : None|FullResolutionFetcher
+            The FullResolutionFetcher instance. If not provided, then this will
+            default to a base FullResolutionFetcher instance - which is only
+            useful for a basic detected image.
+        bounds : None|numpy.ndarray|list|tuple
+            The pixel bounds of the form `(min row, max row, min col, max col)`.
+            This will default to the full image.
+        apply_remap : bool
+            Should a remap be applied, or raw values fetched?
+        dmin : int|float
+            Parameter for `amplitude_to_density` remap function.
+            See `sarpy.visualization.remap.amplitude_to_density`.
+        mmult : int|float
+            Parameter for `amplitude_to_density` remap function.
+            See `sarpy.visualization.remap.amplitude_to_density`.
+        """
+
+        self._this_index = None
+        self._iteration_blocks = None
+        self._the_mean = None
+        self._dmin = dmin
+        self._mmult = mmult
+
+        # validate ortho_helper
+        if not isinstance(ortho_helper, OrthorectificationHelper):
+            raise TypeError(
+                'ortho_helper must be an instance of OrthorectificationHelper, got '
+                'type {}'.format(type(ortho_helper)))
+        self._ortho_helper = ortho_helper
+
+        # validate calculator
+        if calculator is None:
+            calculator = FullResolutionFetcher(ortho_helper.reader, index=ortho_helper.index, dimension=0)
+        if not isinstance(calculator, FullResolutionFetcher):
+            raise TypeError(
+                'calculator must be an instance of FullResolutionFetcher, got '
+                'type {}'.format(type(calculator)))
+        self._calculator = calculator
+
+        if os.path.abspath(ortho_helper.reader.file_name) != \
+                os.path.abspath(calculator.reader.file_name):
+            raise ValueError(
+                'ortho_helper has reader for file {}, while calculator has reader '
+                'for file {}'.format(ortho_helper.reader.file_name, calculator.reader.file_name))
+        if ortho_helper.index != calculator.index:
+            raise ValueError(
+                'ortho_helper is using index {}, while calculator is using '
+                'index {}'.format(ortho_helper.index, calculator.index))
+
+        # validate the bounds
+        data_size = calculator.data_size
+        if bounds is not None:
+            pixel_bounds, pixel_rectangle = ortho_helper.bounds_to_rectangle(bounds)
+            # get the corresponding ortho bounds
+            ortho_bounds = ortho_helper.get_orthorectification_bounds_from_pixel_object(pixel_rectangle)
+        else:
+            ortho_bounds = ortho_helper.get_full_ortho_bounds()
+            ortho_bounds, nominal_pixel_bounds = ortho_helper.extract_pixel_bounds(ortho_bounds)
+            # extract the values - ensure that things are within proper image bounds
+            pixel_bounds = ortho_helper.get_real_pixel_bounds(nominal_pixel_bounds)
+
+        self._pixel_bounds = pixel_bounds
+        self._ortho_bounds = ortho_bounds
+        self._apply_remap = not (apply_remap is False)
+        self._prepare_state()
+
+    @property
+    def ortho_helper(self):
+        # type: () -> OrthorectificationHelper
+        """
+        OrthorectificationHelper: The ortho-rectification helper.
+        """
+
+        return self._ortho_helper
+
+    @property
+    def calculator(self):
+        # type: () -> FullResolutionFetcher
+        """
+        FullResolutionFetcher : The calculator instance.
+        """
+
+        return self._calculator
+
+    @property
+    def sicd(self):
+        """
+        SICDType: The sicd structure.
+        """
+
+        return self.calculator.sicd
+
+    @property
+    def pixel_bounds(self):
+        """
+        numpy.ndarray : Of the form `(row min, row max, col min, col max)`.
+        """
+
+        return self._pixel_bounds
+
+    @property
+    def ortho_bounds(self):
+        """
+        numpy.ndarray : Of the form `(row min, row max, col min, col max)`. Note that
+        these are "unnormalized" orthorectified pixel coordinates.
+        """
+
+        return self._ortho_bounds
+
+    @property
+    def ortho_data_size(self):
+        """
+        Tuple[int, int] : The size of the overall ortho-rectified output.
+        """
+
+        return (
+            int_func(self.ortho_bounds[1] - self.ortho_bounds[0]),
+            int_func(self.ortho_bounds[3] - self.ortho_bounds[2]))
+
+    @property
+    def data_mean_magnitude(self):
+        """
+        float: Gets the mean magnitude for the reader across the pixel bounds in question.
+        """
+
+        return self._the_mean
+
+    def get_ecf_image_corners(self):
+        """
+        The corner points of the overall ortho-rectified output in ECF
+        coordinates. The ordering of these points follows the SICD convention.
+
+        Returns
+        -------
+        numpy.ndarray
+        """
+
+        if self.ortho_bounds is None:
+            return None
+        _, ortho_pixel_corners = self._ortho_helper.bounds_to_rectangle(self.ortho_bounds)
+        return self._ortho_helper.proj_helper.ortho_to_ecf(ortho_pixel_corners)
+
+    def get_llh_image_corners(self):
+        """
+        The corner points of the overall ortho-rectified output in Lat/Lon/HAE
+        coordinates. The ordering of these points follows the SICD convention.
+
+        Returns
+        -------
+        numpy.ndarray
+        """
+
+        ecf_corners = self.get_ecf_image_corners()
+        if ecf_corners is None:
+            return None
+        else:
+            return ecf_to_geodetic(ecf_corners)
+
+    def _prepare_state(self):
+        """
+        Prepare the iteration state.
+
+        Returns
+        -------
+        None
+        """
+
+        if self.calculator.dimension == 0:
+            column_block_size = self.calculator.get_fetch_block_size(self.ortho_bounds[0], self.ortho_bounds[1])
+            self._iteration_blocks, _ = self.calculator.extract_blocks(
+                (self.ortho_bounds[2], self.ortho_bounds[3], 1), column_block_size)
+        else:
+            row_block_size = self.calculator.get_fetch_block_size(self.ortho_bounds[2], self.ortho_bounds[3])
+            self._iteration_blocks, _ = self.calculator.extract_blocks(
+                (self.ortho_bounds[0], self.ortho_bounds[1], 1), row_block_size)
+        if self._apply_remap:
+            # we only need this in order to apply a remap
+            self._the_mean = self.calculator.get_data_mean_magnitude(self._pixel_bounds)
+
+    def _get_ortho_helper(self, pixel_bounds, this_data):
+        """
+        Get helper data for ortho-rectification.
+
+        Parameters
+        ----------
+        pixel_bounds
+        this_data
+
+        Returns
+        -------
+        (numpy.ndarray, numpy.ndarray)
+        """
+
+        rows_temp = pixel_bounds[1] - pixel_bounds[0]
+        if this_data.shape[0] == rows_temp:
+            row_array = numpy.arange(pixel_bounds[0], pixel_bounds[1])
+        elif this_data.shape[0] == (rows_temp - 1):
+            row_array = numpy.arange(pixel_bounds[0], pixel_bounds[1] - 1)
+        else:
+            raise ValueError('Unhandled data size mismatch {} and {}'.format(this_data.shape, rows_temp))
+
+        cols_temp = pixel_bounds[3] - pixel_bounds[2]
+        if this_data.shape[1] == cols_temp:
+            col_array = numpy.arange(pixel_bounds[2], pixel_bounds[3])
+        elif this_data.shape[1] == (cols_temp - 1):
+            col_array = numpy.arange(pixel_bounds[2], pixel_bounds[3] - 1)
+        else:
+            raise ValueError('Unhandled data size mismatch {} and {}'.format(this_data.shape, cols_temp))
+        return row_array, col_array
+
+    def _get_orthorectified_version(self, this_ortho_bounds, pixel_bounds, this_data):
+        """
+        Get the orthorectified version from the raw values and pixel information.
+
+        Parameters
+        ----------
+        this_ortho_bounds
+        pixel_bounds
+        this_data
+
+        Returns
+        -------
+        numpy.ndarray
+        """
+
+        row_array, col_array = self._get_ortho_helper(pixel_bounds, this_data)
+        if self._apply_remap:
+            return clip_cast(
+                amplitude_to_density(
+                    self._ortho_helper.get_orthorectified_from_array(this_ortho_bounds, row_array, col_array, this_data),
+                    dmin=self._dmin,
+                    mmult=self._mmult,
+                    data_mean=self._the_mean),
+                dtype='uint8')
+        else:
+            return self._ortho_helper.get_orthorectified_from_array(this_ortho_bounds, row_array, col_array, this_data)
+
+    def _get_state_parameters(self):
+        """
+        Gets the pixel information associated with the current state.
+
+        Returns
+        -------
+        (numpy.ndarray, numpy.ndarray)
+        """
+
+        if self._calculator.dimension == 0:
+            this_column_range = self._iteration_blocks[self._this_index]
+            # determine the corresponding pixel ranges to encompass these values
+            this_ortho_bounds, this_pixel_bounds = self._ortho_helper.extract_pixel_bounds(
+                (self.ortho_bounds[0], self.ortho_bounds[1], this_column_range[0], this_column_range[1]))
+        else:
+            this_row_range = self._iteration_blocks[self._this_index]
+            this_ortho_bounds, this_pixel_bounds = self._ortho_helper.extract_pixel_bounds(
+                (this_row_range[0], this_row_range[1], self.ortho_bounds[2], self.ortho_bounds[3]))
+        return this_ortho_bounds, this_pixel_bounds
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        """
+        Get the next iteration of orthorectified data.
+
+        Returns
+        -------
+        (numpy.ndarray, Tuple[int, int])
+            The data and the (normalized) indices (start_row, start_col) for this section of data, relative
+            to overall output shape.
+        """
+
+        # NB: this is the Python 3 pattern for iteration
+        if self._this_index is None:
+            self._this_index = 0
+        else:
+            self._this_index += 1
+        # at this point, _this_index indicates which entry to return
+        if self._this_index >= len(self._iteration_blocks):
+            self._this_index = None  # reset the iteration scheme
+            raise StopIteration()
+
+        this_ortho_bounds, this_pixel_bounds = self._get_state_parameters()
+        # accommodate for real pixel limits
+        this_pixel_bounds = self._ortho_helper.get_real_pixel_bounds(this_pixel_bounds)
+        # extract the csi data and ortho-rectify
+        logging.info(
+            'Fetching orthorectified coordinate block ({}:{}, {}:{}) of ({}, {})'.format(
+                this_ortho_bounds[0] - self.ortho_bounds[0], this_ortho_bounds[1] - self.ortho_bounds[0],
+                this_ortho_bounds[2] - self.ortho_bounds[2], this_ortho_bounds[3] - self.ortho_bounds[2],
+                self.ortho_bounds[1] - self.ortho_bounds[0], self.ortho_bounds[3] - self.ortho_bounds[2]))
+        ortho_data = self._get_orthorectified_version(
+            this_ortho_bounds, this_pixel_bounds,
+            self._calculator[this_pixel_bounds[0]:this_pixel_bounds[1], this_pixel_bounds[2]:this_pixel_bounds[3]])
+        # determine the relative image size
+        start_indices = (this_ortho_bounds[0] - self.ortho_bounds[0],
+                         this_ortho_bounds[2] - self.ortho_bounds[2])
+        return ortho_data, start_indices
+
+    def next(self):
+        """
+        Get the next iteration of ortho-rectified data.
+
+        Returns
+        -------
+        numpy.ndarray, Tuple[int, int]
+            The data and the (normalized) indices (start_row, start_col) for this section of data, relative
+            to overall output shape.
+        """
+
+        # NB: this is the Python 2 pattern for iteration
+        return self.__next__()

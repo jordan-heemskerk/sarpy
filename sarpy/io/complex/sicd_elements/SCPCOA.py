@@ -19,6 +19,116 @@ __classification__ = "UNCLASSIFIED"
 __author__ = "Thomas McCullough"
 
 
+class GeometryCalculator(object):
+    """
+    Performs the necessary SCPCOA geometry element calculations.
+    """
+
+    def __init__(self, SCP, ARPPos, ARPVel):
+        self.SCP = SCP
+        self.ARP = ARPPos
+        self.ARP_vel = ARPVel
+        self.LOS = (self.SCP - self.ARP)
+        # unit vector versions
+        self.uSCP = self._make_unit(self.SCP)
+        self.uARP = self._make_unit(self.ARP)
+        self.uARP_vel = self._make_unit(self.ARP_vel)
+        self.uLOS = self._make_unit(self.LOS)
+        self.left = numpy.cross(self.uARP, self.uARP_vel)
+        self.look = numpy.sign(self.left.dot(self.uLOS))
+        # Earth Tangent Plane (ETP) at the SCP is the plane tangent to the surface of constant height
+        # above the WGS 84 ellipsoid (HAE) that contains the SCP. The ETP is an approximation to the
+        # ground plane at the SCP.
+        self.ETP = geocoords.wgs_84_norm(SCP)
+        # slant plane unit normal
+        self.uSPZ = self._make_unit(self.look*numpy.cross(self.ARP_vel, self.uLOS))
+        # perpendicular component of range vector wrt the ground plane
+        self.uGPX = self._make_unit(-self.uLOS + numpy.dot(self.ETP, self.uLOS)*self.ETP)
+        self.uGPY = numpy.cross(self.ETP, self.uGPX)  # already unit vector
+        # perpendicular component of north wrt the ground plane
+        self.uNORTH = self._make_unit(numpy.array([0, 0, 1]) - self.ETP[2]*self.ETP)
+        self.uEAST = numpy.cross(self.uNORTH, self.ETP)  # already unit vector
+
+    @staticmethod
+    def _make_unit(vec):
+        vec_norm = norm(vec)
+        if vec_norm < 1e-6:
+            logging.error(
+                'The input vector to be normalized has norm {}, this is likely a mistake'.format(vec_norm))
+        return vec/vec_norm
+
+    @property
+    def ROV(self):
+        """
+        float: Range over velocity
+        """
+        return float(norm(self.LOS)/norm(self.ARP_vel))
+
+    @property
+    def SideOfTrack(self):
+        return 'R' if self.look < 0 else 'L'
+
+    @property
+    def SlantRange(self):
+        return float(norm(self.LOS))
+
+    @property
+    def GroundRange(self):
+        return norm(self.SCP) * numpy.arccos(self.uSCP.dot(self.uARP))
+
+    @property
+    def DopplerConeAng(self):
+        return float(numpy.rad2deg(numpy.arccos(self.uARP_vel.dot(self.uLOS))))
+
+    @property
+    def GrazeAng(self):
+        return self.get_graze_and_incidence()[0]
+
+    @property
+    def IncidenceAng(self):
+        return self.get_graze_and_incidence()[1]
+
+    def get_graze_and_incidence(self):
+        graze_ang = -float(numpy.rad2deg(numpy.arcsin(self.ETP.dot(self.uLOS))))
+        return graze_ang, 90 - graze_ang
+
+    @property
+    def TwistAng(self):
+        return float(-numpy.rad2deg(numpy.arcsin(self.uGPY.dot(self.uSPZ))))
+
+    @property
+    def SquintAngle(self):
+        return float(numpy.rad2deg(
+            numpy.arctan2(self.uARP_vel.dot(self.uGPX), self.uARP_vel.dot(self.uGPY))))
+
+    @property
+    def SlopeAng(self):
+        return float(numpy.rad2deg(numpy.arccos(self.ETP.dot(self.uSPZ))))
+
+    @property
+    def AzimAng(self):
+        azim_ang = numpy.rad2deg(numpy.arctan2(self.uGPX.dot(self.uEAST), self.uGPX.dot(self.uNORTH)))
+        azim_ang = azim_ang if azim_ang > 0 else azim_ang + 360
+        return float(azim_ang)
+
+    @property
+    def LayoverAng(self):
+        return self.get_layover()[0]
+
+    def get_layover(self):
+        layover_ground = self.ETP - self.ETP.dot(self.uSPZ)*self.uSPZ
+        layover_ang = numpy.rad2deg(
+            numpy.arctan2(layover_ground.dot(self.uEAST), layover_ground.dot(self.uNORTH)))
+        layover_ang = layover_ang if layover_ang > 0 else layover_ang + 360
+        return float(layover_ang), float(norm(layover_ground))
+
+    def get_shadow(self):
+        S = self.ETP - self.uLOS/self.uLOS.dot(self.ETP)
+        Sprime = S - self.uSPZ*(S.dot(self.ETP)/self.uSPZ.dot(self.ETP))
+        shadow_angle = numpy.rad2deg(numpy.arctan2(Sprime.dot(self.uGPX), Sprime.dot(self.uGPY)))
+        return float(shadow_angle), float(norm(Sprime))
+
+
 class SCPCOAType(Serializable):
     """
     Center of Aperture (COA) for the Scene Center Point (SCP).
@@ -105,7 +215,12 @@ class SCPCOAType(Serializable):
         LayoverAng : float
         kwargs : dict
         """
+
         self._ROV = None
+        self._squint = None
+        self._shadow = None
+        self._shadow_magnitude = None
+        self._layover_magnitude = None
 
         if '_xml_ns' in kwargs:
             self._xml_ns = kwargs['_xml_ns']
@@ -175,15 +290,40 @@ class SCPCOAType(Serializable):
         float: The anticipated angle of shadow features in degrees.
         """
 
-        return numpy.mod(self.AzimAng - 180, 360)
+        return self._shadow
 
-    def _derive_scp_time(self, Grid):
+    @property
+    def ShadowMagnitude(self):
+        """
+        float: The anticipated relative magnitude of shadow features.
+        """
+
+        return self._shadow_magnitude
+
+    @property
+    def Squint(self):
+        """
+        float: The squint angle, in degrees.
+        """
+
+        return self._squint
+
+    @property
+    def LayoverMagnitude(self):
+        """
+        float: The anticipated relative magnitude of layover features.
+        """
+
+        return self._layover_magnitude
+
+    def _derive_scp_time(self, Grid, overwrite=False):
         """
         Expected to be called by SICD parent.
 
         Parameters
         ----------
         Grid : sarpy.io.complex.sicd_elements.GridType
+        overwrite : bool
 
         Returns
         -------
@@ -192,22 +332,20 @@ class SCPCOAType(Serializable):
 
         if Grid is None or Grid.TimeCOAPoly is None:
             return  # nothing can be done
+        if not overwrite and self.SCPTime is not None:
+            return  # nothing should be done
 
         scp_time = Grid.TimeCOAPoly.Coefs[0, 0]
-        if self.SCPTime is None:
-            self.SCPTime = scp_time
-        elif abs(self.SCPTime - scp_time) > 1e-8:  # useful tolerance?
-            logging.warning(
-                'The SCPTime is derived from Grid.TimeCOAPoly as {}, and it is set '
-                'as {}'.format(scp_time, self.SCPTime))
+        self.SCPTime = scp_time
 
-    def _derive_position(self, Position):
+    def _derive_position(self, Position, overwrite=False):
         """
         Derive aperture position parameters, if necessary. Expected to be called by SICD parent.
 
         Parameters
         ----------
         Position : sarpy.io.complex.sicd_elements.Position.PositionType
+        overwrite : bool
 
         Returns
         -------
@@ -217,24 +355,24 @@ class SCPCOAType(Serializable):
         if Position is None or Position.ARPPoly is None or self.SCPTime is None:
             return  # nothing can be derived
 
-        # set aperture position, velocity, and acceleration at scptime from position polynomial, if necessary
+        # set aperture position, velocity, and acceleration at scptime from position
+        # polynomial, if necessary
         poly = Position.ARPPoly
         scptime = self.SCPTime
 
-        if self.ARPPos is None:
+        if self.ARPPos is None or overwrite:
             self.ARPPos = XYZType.from_array(poly(scptime))
-        if self.ARPVel is None:
             self.ARPVel = XYZType.from_array(poly.derivative_eval(scptime, 1))
-        if self.ARPAcc is None:
             self.ARPAcc = XYZType.from_array(poly.derivative_eval(scptime, 2))
 
-    def _derive_geometry_parameters(self, GeoData):
+    def _derive_geometry_parameters(self, GeoData, overwrite=False):
         """
         Expected to be called by SICD parent.
 
         Parameters
         ----------
         GeoData : sarpy.io.complex.sicd_elements.GeoData.GeoDataType
+        overwrite : bool
 
         Returns
         -------
@@ -245,102 +383,96 @@ class SCPCOAType(Serializable):
                 self.ARPPos is None or self.ARPVel is None:
             return  # nothing can be derived
 
-        SCP = GeoData.SCP.ECF.get_array()
-        ARP = self.ARPPos.get_array()
-        ARP_vel = self.ARPVel.get_array()
-        LOS = (SCP - ARP)
-        self._ROV = float(numpy.linalg.norm(LOS)/numpy.linalg.norm(ARP_vel))
-        # unit vector versions
-        uSCP = SCP/norm(SCP)
-        uARP = ARP/norm(ARP)
-        uARP_vel = ARP_vel/norm(ARP_vel)
-        uLOS = LOS/norm(LOS)
-        # cross product junk
-        left = numpy.cross(uARP, uARP_vel)
-        look = numpy.sign(numpy.dot(left, uLOS))
+        # construct our calculator
+        calculator = GeometryCalculator(
+            GeoData.SCP.ECF.get_array(), self.ARPPos.get_array(), self.ARPVel.get_array())
+        # set all the values
+        self._ROV = calculator.ROV
+        if self.SideOfTrack is None or overwrite:
+            self.SideOfTrack = calculator.SideOfTrack
+        if self.SlantRange is None or overwrite:
+            self.SlantRange = calculator.SlantRange
+        if self.GroundRange is None or overwrite:
+            self.GroundRange = calculator.GroundRange
+        if self.DopplerConeAng is None or overwrite:
+            self.DopplerConeAng = calculator.DopplerConeAng
+        graz, inc = calculator.get_graze_and_incidence()
+        if self.GrazeAng is None or overwrite:
+            self.GrazeAng = graz
+        if self.IncidenceAng is None or overwrite:
+            self.IncidenceAng = inc
+        if self.TwistAng is None or overwrite:
+            self.TwistAng = calculator.TwistAng
+        self._squint = calculator.SquintAngle
+        if self.SlopeAng is None or overwrite:
+            self.SlopeAng = calculator.SlopeAng
+        if self.AzimAng is None or overwrite:
+            self.AzimAng = calculator.AzimAng
+        layover, self._layover_magnitude = calculator.get_layover()
+        if self.LayoverAng is None or overwrite:
+            self.LayoverAng = layover
+        self._shadow, self._shadow_magnitude = calculator.get_shadow()
 
-        sot = 'R' if look < 0 else 'L'
-        if self.SideOfTrack is None:
-            self.SideOfTrack = sot
-        elif self.SideOfTrack != sot:
-            logging.error(
-                'In SCPCOAType, the derived value for SideOfTrack is {} and the set '
-                'value is {}'.format(sot, self.SideOfTrack))
+    def rederive(self, Grid, Position, GeoData):
+        """
+        Rederive all derived quantities.
 
-        slant_range = numpy.linalg.norm(LOS)
-        if self.SlantRange is None:
-            self.SlantRange = slant_range
-        elif abs(self.SlantRange - slant_range) > 1e-5:  # sensible tolerance?
-            logging.error('In SCPCOAType, the derived value for SlantRange is {} and the set '
-                          'value is {}'.format(slant_range, self.SlantRange))
+        Parameters
+        ----------
+        Grid : sarpy.io.complex.sicd_elements.GridType
+        Position : sarpy.io.complex.sicd_elements.Position.PositionType
+        GeoData : sarpy.io.complex.sicd_elements.GeoData.GeoDataType
 
-        ground_range = norm(SCP)*numpy.arccos(numpy.dot(uSCP, uARP))
-        if self.GroundRange is None:
-            self.GroundRange = ground_range
-        elif abs(self.GroundRange - ground_range) > 1e-5:  # sensible tolerance?
-            logging.error('In SCPCOAType, the derived value for GroundRange is {} and the set '
-                          'value is {}'.format(ground_range, self.GroundRange))
+        Returns
+        -------
+        None
+        """
 
-        doppler_cone = numpy.rad2deg(numpy.arccos(numpy.dot(uARP_vel, uLOS)))
-        if self.DopplerConeAng is None:
-            self.DopplerConeAng = doppler_cone
-        elif abs(self.DopplerConeAng - doppler_cone) > 1e-5:  # sensible tolerance?
-            logging.error('In SCPCOAType, the derived value for DopplerConeAng is {} and the set '
-                          'value is {}'.format(doppler_cone, self.DopplerConeAng))
+        self._derive_scp_time(Grid, overwrite=True)
+        self._derive_position(Position, overwrite=True)
+        self._derive_geometry_parameters(GeoData, overwrite=True)
 
-        # Earth Tangent Plane (ETP) at the SCP is the plane tangent to the surface of constant height
-        # above the WGS 84 ellipsoid (HAE) that contains the SCP. The ETP is an approximation to the
-        # ground plane at the SCP.
-        ETP = geocoords.wgs_84_norm(SCP)
-        graze_ang = numpy.rad2deg(numpy.arcsin(numpy.dot(ETP, -uLOS)))
-        if self.GrazeAng is None:
-            self.GrazeAng = graze_ang
-        elif abs(self.GrazeAng - graze_ang) > 1e-5:  # sensible tolerance?
-            logging.error('In SCPCOAType, the derived value for GrazeAng is {} and the set '
-                          'value is {}'.format(graze_ang, self.GrazeAng))
+    def check_values(self, GeoData):
+        """
+        Check derived values for validity.
 
-        if self.IncidenceAng is None:
-            self.IncidenceAng = 90 - self.GrazeAng
+        Parameters
+        ----------
+        GeoData : sarpy.io.complex.sicd_elements.GeoData.GeoDataType
 
-        # slant plane unit normal
-        uSPZ = look*numpy.cross(ARP_vel, uLOS)
-        uSPZ /= norm(uSPZ)
-        # perpendicular component of range vector wrt the ground plane
-        uGPX = -uLOS + numpy.dot(ETP, uLOS)*ETP
-        uGPX /= norm(uGPX)
-        uGPY = numpy.cross(ETP, uGPX)  # already unit vector
-        twist_ang = -numpy.rad2deg(numpy.arcsin(numpy.dot(uGPY, uSPZ)))
-        if self.TwistAng is None:
-            self.TwistAng = twist_ang
-        elif abs(self.TwistAng - twist_ang) > 1e-5:  # sensible tolerance?
-            logging.error('In SCPCOAType, the derived value for TwistAng is {} and the set '
-                          'value is {}'.format(twist_ang, self.TwistAng))
+        Returns
+        -------
+        bool
+        """
 
-        slope_ang = numpy.rad2deg(numpy.arccos(numpy.dot(ETP, uSPZ)))
-        if self.SlopeAng is None:
-            self.SlopeAng = slope_ang
-        elif abs(self.SlopeAng - slope_ang) > 1e-5:  # sensible tolerance?
-            logging.error('In SCPCOAType, the derived value for SlopeAng is {} and the set '
-                          'value is {}'.format(slope_ang, self.SlopeAng))
+        if GeoData is None or GeoData.SCP is None or GeoData.SCP.ECF is None or \
+                self.ARPPos is None or self.ARPVel is None:
+            return True # nothing can be derived
 
-        # perpendicular component of north wrt the ground plane
-        NORTH = numpy.array([0, 0, 1]) - ETP[2]*ETP
-        uNORTH = NORTH/norm(NORTH)
-        uEAST = numpy.cross(uNORTH, ETP)  # already unit vector
-        azim_ang = numpy.rad2deg(numpy.arctan2(numpy.dot(uGPX, uEAST), numpy.dot(uGPX, uNORTH)))
-        azim_ang = azim_ang if azim_ang > 0 else azim_ang + 360
-        if self.AzimAng is None:
-            self.AzimAng = azim_ang
-        elif abs(self.AzimAng - azim_ang) > 1e-5:  # sensible tolerance?
-            logging.error('In SCPCOAType, the derived value for AzimAng is {} and the set '
-                          'value is {}'.format(azim_ang, self.AzimAng))
+        # construct our calculator
+        calculator = GeometryCalculator(
+            GeoData.SCP.ECF.get_array(), self.ARPPos.get_array(), self.ARPVel.get_array())
 
-        # perpendicular component of ground plane wrt slant plane
-        layover_ground = ETP - numpy.dot(ETP, uSPZ)*uSPZ
-        layover_ang = numpy.rad2deg(numpy.arctan2(numpy.dot(layover_ground, uEAST), numpy.dot(layover_ground, uNORTH)))
-        layover_ang = layover_ang if layover_ang > 0 else layover_ang + 360
-        if self.LayoverAng is None:
-            self.LayoverAng = layover_ang
-        elif abs(self.LayoverAng - layover_ang) > 1e-5:  # sensible tolerance?
-            logging.error('In SCPCOAType, the derived value for LayoverAng is {} and the set '
-                          'value is {}'.format(layover_ang, self.LayoverAng))
+        cond = True
+        if calculator.SideOfTrack != self.SideOfTrack:
+            self.log_validity_error(
+                'SideOfTrack is expected to be {}, and is populated as {}'.format(calculator.SideOfTrack, self.SideOfTrack))
+            cond = False
+
+        for attribute in ['SlantRange', 'GroundRange']:
+            val1 = getattr(self, attribute)
+            val2 = getattr(calculator, attribute)
+            if abs(val1/val2 - 1) > 1e-6:
+                self.log_validity_error(
+                    'attribute {} is expected to have value {}, but is populated as {}'.format(attribute, val1, val2))
+                cond = False
+
+        for attribute in [
+            'DopplerConeAng', 'GrazeAng', 'IncidenceAng', 'TwistAng', 'SlopeAng', 'AzimAng', 'LayoverAng']:
+            val1 = getattr(self, attribute)
+            val2 = getattr(calculator, attribute)
+            if abs(val1 - val2) > 1e-3:
+                self.log_validity_error(
+                    'attribute {} is expected to have value {}, but is populated as {}'.format(attribute, val1, val2))
+                cond = False
+        return cond

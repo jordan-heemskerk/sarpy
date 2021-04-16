@@ -13,10 +13,10 @@ import logging
 from typing import Union, List, Tuple
 
 from sarpy.compliance import int_func
-from ..general.base import BaseReader
-from .sicd import SICDWriter
-from .sio import SIOWriter
-from .sicd_elements.SICD import SICDType
+from sarpy.io.general.base import BaseReader
+from sarpy.io.complex.sicd import SICDWriter
+from sarpy.io.complex.sio import SIOWriter
+from sarpy.io.complex.sicd_elements.SICD import SICDType
 
 
 __classification__ = "UNCLASSIFIED"
@@ -36,7 +36,7 @@ def register_opener(open_func):
 
     Parameters
     ----------
-    open_func : dict
+    open_func : callable
         This is required to be a function which takes a single argument (file name).
         This function should return a sarpy.io.complex.base.BaseReader instance
         if the referenced file is viable for the underlying type, and None otherwise.
@@ -88,6 +88,19 @@ def parse_openers():
     check_module('sarpy.io.complex')
 
 
+def _define_final_attempt_openers():
+    """
+    Gets the prioritized list of openers to attempt after regular openers.
+
+    Returns
+    -------
+    list
+    """
+
+    from sarpy.io.complex.other_nitf import final_attempt
+    return [final_attempt, ]
+
+
 def open_complex(file_name):
     """
     Given a file, try to find and return the appropriate reader object.
@@ -114,6 +127,11 @@ def open_complex(file_name):
         reader = opener(file_name)
         if reader is not None:
             return reader
+    # check the final attempt openers
+    for opener in _define_final_attempt_openers():
+        reader = opener(file_name)
+        if reader is not None:
+            return reader
 
     # If for loop completes, no matching file format was found.
     raise IOError('Unable to determine complex image format.')
@@ -128,7 +146,8 @@ class Converter(object):
 
     __slots__ = ('_reader', '_file_name', '_writer', '_frame', '_row_limits', '_col_limits')
 
-    def __init__(self, reader, output_directory, output_file=None, frame=None, row_limits=None, col_limits=None, output_format='SICD'):
+    def __init__(self, reader, output_directory, output_file=None, frame=None, row_limits=None, col_limits=None,
+                 output_format='SICD', check_older_version=False, check_existence=True):
         """
 
         Parameters
@@ -149,6 +168,10 @@ class Converter(object):
            Column start/stop. Default is all.
         output_format : str
            The output file format to write, from {'SICD', 'SIO'}.  Default is SICD.
+        check_older_version : bool
+            Try to use a less recent version of SICD (1.1), for possible application compliance issues?
+        check_existence : bool
+            Should we check if the given file already exists, and raises an exception if so?
         """
 
         if not (os.path.exists(output_directory) and os.path.isdir(output_directory)):
@@ -156,7 +179,7 @@ class Converter(object):
         if output_file is None:
             output_file = reader.get_sicds_as_tuple()[frame].get_suggested_name(frame+1)+'_SICD'
         output_path = os.path.join(output_directory, output_file)
-        if os.path.exists(output_path):
+        if check_existence and os.path.exists(output_path):
             raise IOError('The file {} already exists.'.format(output_path))
 
         # validate the output format and fetch the writer type
@@ -209,7 +232,7 @@ class Converter(object):
         this_sicd = self._update_sicd(this_sicd, this_shape)
         # set up our writer
         self._file_name = output_path
-        self._writer = writer_type(output_path, this_sicd)
+        self._writer = writer_type(output_path, this_sicd, check_older_version=check_older_version, check_existence=check_existence)
 
     def _update_sicd(self, sicd, t_size):
         # type: (SICDType, Tuple[int, int]) -> SICDType
@@ -293,7 +316,7 @@ class Converter(object):
 
 def conversion_utility(
         input_file, output_directory, output_files=None, frames=None, output_format='SICD',
-        row_limits=None, column_limits=None, max_block_size=None):
+        row_limits=None, column_limits=None, max_block_size=None, check_older_version=False):
     """
     Copy SAR complex data to a file of the specified format.
 
@@ -316,6 +339,8 @@ def conversion_utility(
        Columns start/stop. Default is all.
     max_block_size : None|int
         (nominal) maximum block size in bytes. Passed through to the Converter class.
+    check_older_version : bool
+        Try to use a less recent version of SICD (1.1), for possible application compliance issues?
 
     Returns
     -------
@@ -430,5 +455,6 @@ def conversion_utility(
         logging.info('Converting frame {} from file {} to file {}'.format(frame, input_file, o_file))
         with Converter(
                 reader, output_directory, output_file=o_file, frame=frame,
-                row_limits=row_lims, col_limits=col_lims, output_format=output_format) as converter:
+                row_limits=row_lims, col_limits=col_lims, output_format=output_format,
+                check_older_version=check_older_version) as converter:
             converter.write_data(max_block_size=max_block_size)

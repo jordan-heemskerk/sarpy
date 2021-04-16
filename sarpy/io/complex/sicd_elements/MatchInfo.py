@@ -55,12 +55,12 @@ class MatchCollectionType(Serializable):
 
 class MatchType(Serializable):
     """The is an array element for match information."""
-    _fields = ('TypeId', 'CurrentIndex', 'NumMatchCollections', 'MatchCollections')
-    _required = ('TypeId',)
+    _fields = ('TypeID', 'CurrentIndex', 'NumMatchCollections', 'MatchCollections')
+    _required = ('TypeID',)
     _collections_tags = {'MatchCollections': {'array': False, 'child_tag': 'MatchCollection'}}
     # descriptors
-    TypeId = _StringDescriptor(
-        'TypeId', _required, strict=DEFAULT_STRICT,
+    TypeID = _StringDescriptor(
+        'TypeID', _required, strict=DEFAULT_STRICT,
         docstring='The match type identifier. *Examples - "MULTI-IMAGE", "COHERENT" or "STEREO"*')  # type: str
     CurrentIndex = _IntegerDescriptor(
         'CurrentIndex', _required, strict=DEFAULT_STRICT,
@@ -71,12 +71,12 @@ class MatchType(Serializable):
         'MatchCollections', MatchCollectionType, _collections_tags, _required, strict=DEFAULT_STRICT,
         docstring='The match collections.')  # type: List[MatchCollectionType]
 
-    def __init__(self, TypeId=None, CurrentIndex=None, MatchCollections=None, **kwargs):
+    def __init__(self, TypeID=None, CurrentIndex=None, MatchCollections=None, **kwargs):
         """
 
         Parameters
         ----------
-        TypeId : str
+        TypeID : str
         CurrentIndex : int
         MatchCollections : List[MatchCollectionType]
         kwargs : dict
@@ -86,7 +86,7 @@ class MatchType(Serializable):
             self._xml_ns = kwargs['_xml_ns']
         if '_xml_ns_key' in kwargs:
             self._xml_ns_key = kwargs['_xml_ns_key']
-        self.TypeId = TypeId
+        self.TypeID = TypeID
         self.CurrentIndex = CurrentIndex
         self.MatchCollections = MatchCollections
         super(MatchType, self).__init__(**kwargs)
@@ -158,7 +158,7 @@ class MatchInfoType(Serializable):
 
         def get_element(tid, cid, cname, params):
             return {
-                'TypeId': tid,
+                'TypeID': tid,
                 'CurrentIndex': cid,
                 'MatchCollections': [{'CoreName': cname, 'Parameters': params}, ]}
 
@@ -173,7 +173,7 @@ class MatchInfoType(Serializable):
         coll_key = cls._child_xml_ns_key.get('Collect', ns_key)
         cnodes = _find_children(node, 'Collect', xml_ns, coll_key)
         for cnode in cnodes:  # assumed non-empty
-            # this describes one series of collects, possibly with more than one MatchType = TypeId
+            # this describes one series of collects, possibly with more than one MatchType = TypeID
             # It is not clear how it would be possible to deconflict a repeat of MatchType between
             # Collect tags, so I will not.
             core_key = cls._child_xml_ns_key.get('CoreName', ns_key)

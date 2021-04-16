@@ -3,6 +3,10 @@
 Some basic item definitions for python 2 & 3 dual use.
 """
 
+__classification__ = "UNCLASSIFIED"
+__author__ = "Thomas McCullough"
+
+
 import sys
 
 integer_types = (int, )
@@ -12,6 +16,7 @@ int_func = int
 if sys.version_info[0] < 3:
     # noinspection PyUnresolvedReferences
     from cStringIO import StringIO
+    BytesIO = StringIO
     # noinspection PyUnresolvedReferences
     int_func = long
     # noinspection PyUnresolvedReferences
@@ -21,6 +26,7 @@ if sys.version_info[0] < 3:
 else:
     # noinspection PyUnresolvedReferences
     from io import StringIO
+    from io import BytesIO
 
 
 def bytes_to_string(bytes_in, encoding='utf-8'):

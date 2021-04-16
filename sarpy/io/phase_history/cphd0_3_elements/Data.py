@@ -5,9 +5,9 @@ The DataType definition for CPHD 0.3.
 
 from typing import List
 
-from ..cphd1_elements.base import DEFAULT_STRICT
+from sarpy.io.phase_history.cphd1_elements.base import DEFAULT_STRICT
 # noinspection PyProtectedMember
-from ...complex.sicd_elements.base import Serializable, _StringEnumDescriptor, \
+from sarpy.io.complex.sicd_elements.base import Serializable, _StringEnumDescriptor, \
     _IntegerDescriptor, _SerializableListDescriptor
 
 __classification__ = "UNCLASSIFIED"
@@ -27,7 +27,7 @@ class ArraySizeType(Serializable):
         docstring='Number of slow time vectors in the PHD array in this channel.')  # type: int
     NumSamples = _IntegerDescriptor(
         'NumSamples', _required, strict=DEFAULT_STRICT, bounds=(1, None),
-        docstring='Number of slow time vectors in the PHD array in this channel.')  # type: int
+        docstring='Number of samples per vector in the PHD array in this channel.')  # type: int
 
     def __init__(self, NumVectors=None, NumSamples=None, **kwargs):
         """

@@ -2,6 +2,11 @@
 """
 Common use sicd_elements methods.
 """
+
+__classification__ = "UNCLASSIFIED"
+__author__ = "Thomas McCullough"
+
+
 from typing import Tuple
 
 import numpy
@@ -31,6 +36,34 @@ def _get_center_frequency(RadarCollection, ImageFormation):
     return 0.5 * (ImageFormation.TxFrequencyProc.MinProc + ImageFormation.TxFrequencyProc.MaxProc)
 
 
+def is_polstring_version1(str_in):
+    """
+    Is the polarization string compatible for SCD version 1.1?
+
+    Parameters
+    ----------
+    str_in : None|str
+        The tx/rcv polarization string.
+
+    Returns
+    -------
+    bool
+    """
+
+    if str_in is None or str_in in ['OTHER', 'UNKNOWN']:
+        return True
+
+    parts = str_in.split(':')
+    if len(parts) != 2:
+        return False
+
+    part1, part2 = parts
+    if (part1 in ['V', 'H'] and part2 in ['RHC', 'LHC']) or (part2 in ['V', 'H'] and part1 in ['RHC', 'LHC']):
+        return False
+    return True
+
+
+################
 # SICD comparsion and matching methods
 
 def is_same_size(sicd1, sicd2):
@@ -196,4 +229,3 @@ def is_general_match(sicd1, sicd2):
     return is_same_size(sicd1, sicd2) and is_same_sensor(sicd1, sicd2) and \
            is_same_start_time(sicd1, sicd2) and is_same_duration(sicd1, sicd2) and \
            is_same_band(sicd1, sicd2) and is_same_scp(sicd1, sicd2)
-

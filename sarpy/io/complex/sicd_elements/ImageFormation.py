@@ -3,7 +3,7 @@
 The ImageFormationType definition.
 """
 
-from typing import List
+from typing import List, Union
 import logging
 
 import numpy
@@ -13,6 +13,9 @@ from .base import Serializable, DEFAULT_STRICT, \
     _BooleanDescriptor, _ComplexDescriptor, _DateTimeDescriptor, _IntegerListDescriptor, \
     _SerializableDescriptor, _SerializableListDescriptor, _ParametersDescriptor, ParametersCollection
 from .blocks import DUAL_POLARIZATION_VALUES
+from .RadarCollection import get_band_name
+from .utils import is_polstring_version1
+
 
 __classification__ = "UNCLASSIFIED"
 __author__ = "Thomas McCullough"
@@ -87,6 +90,16 @@ class TxFrequencyProcType(Serializable):
         self.MinProc, self.MaxProc = MinProc, MaxProc
         super(TxFrequencyProcType, self).__init__(**kwargs)
 
+    @property
+    def center_frequency(self):
+        """
+        None|float: The center frequency.
+        """
+
+        if self.MinProc is None or self.MaxProc is None:
+            return None
+        return 0.5*(self.MinProc + self.MaxProc)
+
     def _apply_reference_frequency(self, reference_frequency):
         if self.MinProc is not None:
             self.MinProc += reference_frequency
@@ -96,10 +109,26 @@ class TxFrequencyProcType(Serializable):
     def _basic_validity_check(self):
         condition = super(TxFrequencyProcType, self)._basic_validity_check()
         if self.MinProc is not None and self.MaxProc is not None and self.MaxProc < self.MinProc:
-            logging.error(
+            self.log_validity_error(
                 'Invalid frequency bounds MinProc ({}) > MaxProc ({})'.format(self.MinProc, self.MaxProc))
             condition = False
         return condition
+
+    def get_band_name(self):
+        """
+        Gets the band name.
+
+        Returns
+        -------
+        str
+        """
+
+        min_band = get_band_name(self.MinProc)
+        max_band = get_band_name(self.MaxProc)
+        if min_band == max_band:
+            return min_band
+        else:
+            return '{}_{}'.format(min_band, max_band)
 
 
 class ProcessingType(Serializable):
@@ -391,6 +420,15 @@ class ImageFormationType(Serializable):
         self.PolarizationCalibration = PolarizationCalibration
         super(ImageFormationType, self).__init__(**kwargs)
 
+    def _basic_validity_check(self):
+        condition = super(ImageFormationType, self)._basic_validity_check()
+        if self.TStartProc is not None and self.TEndProc is not None and self.TEndProc < self.TStartProc:
+            self.log_validity_error(
+                'Invalid time processing bounds TStartProc ({}) > TEndProc ({})'.format(
+                    self.TStartProc, self.TEndProc))
+            condition = False
+        return condition
+
     def _derive_tx_frequency_proc(self, RadarCollection):
         """
         Populate a default for processed frequency values, based on the assumption that the entire
@@ -436,14 +474,16 @@ class ImageFormationType(Serializable):
             # noinspection PyProtectedMember
             self.TxFrequencyProc._apply_reference_frequency(reference_frequency)
 
-    def _basic_validity_check(self):
-        condition = super(ImageFormationType, self)._basic_validity_check()
-        if self.TStartProc is not None and self.TEndProc is not None and self.TEndProc < self.TStartProc:
-            logging.error(
-                'Invalid time processing bounds '
-                'TStartProc ({}) > TEndProc ({})'.format(self.TStartProc, self.TEndProc))
-            condition = False
-        return condition
+    def get_polarization(self):
+        """
+        Gets the transmit/receive polarization.
+
+        Returns
+        -------
+        str
+        """
+
+        return self.TxRcvPolarizationProc if self.TxRcvPolarizationProc is not None else 'UNKNOWN'
 
     def get_polarization_abbreviation(self):
         """
@@ -459,3 +499,28 @@ class ImageFormationType(Serializable):
             return 'UN'
         fp, sp = pol.split(':')
         return fp[0]+sp[0]
+
+    def get_transmit_band_name(self):
+        """
+        Gets the transmit band name.
+
+        Returns
+        -------
+        str
+        """
+
+        if self.TxFrequencyProc is not None:
+            return self.TxFrequencyProc.get_band_name()
+        else:
+            return 'UN'
+
+    def permits_version_1_1(self):
+        """
+        Does this value permit storage in SICD version 1.1?
+
+        Returns
+        -------
+        bool
+        """
+
+        return is_polstring_version1(self.TxRcvPolarizationProc)

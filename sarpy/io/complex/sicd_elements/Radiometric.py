@@ -150,16 +150,7 @@ class RadiometricType(Serializable):
         if Grid is None or Grid.Row is None or Grid.Col is None:
             return
 
-        range_weight_f = azimuth_weight_f = 1.0  # the default2
-        if Grid.Row.WgtFunct is not None:
-            var = numpy.var(Grid.Row.WgtFunct)
-            mean = numpy.mean(Grid.Row.WgtFunct)
-            range_weight_f += var/(mean*mean)
-        if Grid.Col.WgtFunct is not None:
-            var = numpy.var(Grid.Col.WgtFunct)
-            mean = numpy.mean(Grid.Col.WgtFunct)
-            azimuth_weight_f += var/(mean*mean)
-        area_sp = (range_weight_f*azimuth_weight_f)/(Grid.Row.ImpRespBW*Grid.Col.ImpRespBW)  # what is sp?
+        area_sp = Grid.get_slant_plane_area()
 
         # We can define any SF polynomial from any other SF polynomial by just
         # scaling the coefficient array. If any are defined, use BetaZeroSFPolynomial

@@ -5,8 +5,6 @@ The SICDType definition.
 
 import logging
 import copy
-from datetime import datetime
-import re
 from collections import OrderedDict
 
 import numpy
@@ -29,9 +27,10 @@ from .MatchInfo import MatchInfoType
 from .RgAzComp import RgAzCompType
 from .PFA import PFAType
 from .RMA import RMAType
-from ..utils import snr_to_rniirs
+from .validation_checks import detailed_validation_checks
 
 from sarpy.geometry import point_projection
+from sarpy.io.complex.naming.utils import get_sicd_name
 
 __classification__ = "UNCLASSIFIED"
 __author__ = "Thomas McCullough"
@@ -39,9 +38,25 @@ __author__ = "Thomas McCullough"
 #########
 # Module variables
 _SICD_SPECIFICATION_IDENTIFIER = 'SICD Volume 1 Design & Implementation Description Document'
-_SICD_SPECIFICATION_VERSION = '1.2'
-_SICD_SPECIFICATION_DATE = '2018-12-13T00:00:00Z'
-_SICD_SPECIFICATION_NAMESPACE = 'urn:SICD:1.2.1'
+_SICD_SPECIFICATION_VERSION_1_2 = '1.2'
+_SICD_SPECIFICATION_DATE_1_2 = '2018-12-13T00:00:00Z'
+_SICD_SPECIFICATION_NAMESPACE_1_2 = 'urn:SICD:1.2.1'
+
+_SICD_SPECIFICATION_VERSION_1_1 = '1.1'
+_SICD_SPECIFICATION_DATE_1_1 = '2014-07-08T00:00:00Z'
+_SICD_SPECIFICATION_NAMESPACE_1_1 = 'urn:SICD:1.1.0'
+
+
+def get_specification_identifier():
+    """
+    Get the current specification identifier.
+
+    Returns
+    -------
+    str
+    """
+
+    return _SICD_SPECIFICATION_IDENTIFIER
 
 
 class SICDType(Serializable):
@@ -194,124 +209,47 @@ class SICDType(Serializable):
                 return attribute
         return 'OTHER'
 
-    def _validate_image_segment_id(self):  # type: () -> bool
-        if self.ImageFormation is None or self.RadarCollection is None:
-            return False
+    def update_scp(self, point, coord_system='ECF'):
+        """
+        Modify the SCP point, and modify the associated SCPCOA fields.
 
-        # get the segment identifier
-        seg_id = self.ImageFormation.SegmentIdentifier
-        # get the segment list
-        try:
-            seg_list = self.RadarCollection.Area.Plane.SegmentList
-        except AttributeError:
-            seg_list = None
+        Parameters
+        ----------
+        point : numpy.ndarray|tuple|list
+        coord_system : str
+            Either 'ECF' or 'LLH', and 'ECF' will take precedence.
 
-        if seg_id is None:
-            if seg_list is None:
-                return True
-            else:
-                logging.error(
-                    'ImageFormation.SegmentIdentifier is not populated, but RadarCollection.Area.Plane.SegmentList '
-                    'is populated. ImageFormation.SegmentIdentifier should be set to identify the appropriate segment.')
-                return False
+        Returns
+        -------
+        None
+        """
+
+        if isinstance(point, (list, tuple)):
+            point = numpy.array(point, dtype='float64')
+        if not isinstance(point, numpy.ndarray):
+            raise TypeError('point must be an numpy.ndarray')
+        if point.shape != (3, ):
+            raise ValueError('point must be a one-dimensional, 3 element array')
+        if coord_system == 'LLH':
+            self.GeoData.SCP.LLH = point
         else:
-            if seg_list is None:
-                logging.error(
-                    'ImageFormation.SegmentIdentifier is populated as {}, but RadarCollection.Area.Plane.SegmentList '
-                    'is not populated.'.format(seg_id))
-                return False
-            else:
-                # let's double check that seg_id is sensibly populated
-                the_ids = [entry.Identifier for entry in seg_list]
-                if seg_id in the_ids:
-                    return True
-                else:
-                    logging.error(
-                        'ImageFormation.SegmentIdentifier is populated as {}, but this is not one of the possible '
-                        'identifiers in the RadarCollection.Area.Plane.SegmentList definition {}. '
-                        'ImageFormation.SegmentIdentifier should be set to identify the '
-                        'appropriate segment.'.format(seg_id, the_ids))
-                    return False
+            self.GeoData.SCP.ECF = point
 
-    def _validate_image_form(self):  # type: () -> bool
-        if self.ImageFormation is None:
-            logging.error(
-                'ImageFormation attribute is not populated, and ImageFormType is {}. This '
-                'cannot be valid.'.format(self.ImageFormType))
-            return False  # nothing more to be done.
-
-        alg_types = []
-        for alg in ['RgAzComp', 'PFA', 'RMA']:
-            if getattr(self, alg) is not None:
-                alg_types.append(alg)
-
-        if len(alg_types) > 1:
-            logging.error(
-                'ImageFormation.ImageFormAlgo is set as {}, and multiple SICD image formation parameters {} are set. '
-                'Only one image formation algorithm should be set, and ImageFormation.ImageFormAlgo '
-                'should match.'.format(self.ImageFormation.ImageFormAlgo, alg_types))
-            return False
-        elif len(alg_types) == 0:
-            if self.ImageFormation.ImageFormAlgo is None:
-                logging.warning(
-                    'ImageFormation.ImageFormAlgo is not set, and there is no corresponding RgAzComp, PFA, or RMA '
-                    'SICD parameters set. Setting ImageFormAlgo to "OTHER".'.format(self.ImageFormation.ImageFormAlgo))
-                self.ImageFormation.ImageFormAlgo = 'OTHER'
-                return True
-            elif self.ImageFormation.ImageFormAlgo != 'OTHER':
-                logging.error(
-                    'No RgAzComp, PFA, or RMA SICD parameters populated, but ImageFormation.ImageFormAlgo '
-                    'is set as {}.'.format(self.ImageFormation.ImageFormAlgo))
-                return False
-            return True
-        else:
-            if self.ImageFormation.ImageFormAlgo == alg_types[0].upper():
-                return True
-            elif self.ImageFormation.ImageFormAlgo is None:
-                logging.warning(
-                    'Image formation algorithm(s) {} populated, but ImageFormation.ImageFormAlgo was not set. '
-                    'ImageFormation.ImageFormAlgo has been set.'.format(alg_types[0]))
-                self.ImageFormation.ImageFormAlgo = alg_types[0].upper()
-                return True
-            else:  # they are different values
-                logging.warning(
-                    'Only the image formation algorithm {} is populated, but ImageFormation.ImageFormAlgo '
-                    'was set as {}. ImageFormation.ImageFormAlgo has been '
-                    'changed.'.format(alg_types[0], self.ImageFormation.ImageFormAlgo))
-                self.ImageFormation.ImageFormAlgo = alg_types[0].upper()
-                return True
-
-    def _validate_spotlight_mode(self):
-        if self.CollectionInfo is not None or self.CollectionInfo.RadarMode is not None \
-                or self.CollectionInfo.RadarMode.ModeType is not None:
-            return True
-
-        if self.Grid is None or self.Grid.TimeCOAPoly is None:
-            return True
-
-        if self.CollectionInfo.RadarMode.ModeType == 'SPOTLIGHT' and \
-                self.Grid.TimeCOAPoly.Coefs.shape != (1, 1):
-            logging.error(
-                'CollectionInfo.RadarMode.ModeType is SPOTLIGHT, but the Grid.TimeCOAPoly '
-                'is not scalar - {}. This cannot be valid.'.format(self.Grid.TimeCOAPoly.Coefs))
-            return False
-        elif self.Grid.TimeCOAPoly.Coefs.shape == (1, 1) and \
-                self.CollectionInfo.RadarMode.ModeType != 'SPOTLIGHT':
-            logging.warning(
-                'The Grid.TimeCOAPoly is scalar, but the CollectionInfo.RadarMode.ModeType '
-                'is not SPOTLIGHT - {}. This is likely not valid.'.format(self.CollectionInfo.RadarMode.ModeType))
-            return True
-        return True
+        if self.SCPCOA is not None:
+            self.SCPCOA.rederive(self.Grid, self.Position, self.GeoData)
 
     def _basic_validity_check(self):
         condition = super(SICDType, self)._basic_validity_check()
-        # do our image formation parameters match, as appropriate?
-        condition &= self._validate_image_form()
-        # does the image formation segment identifier and radar collection make sense?
-        condition &= self._validate_image_segment_id()
-        # do the mode and timecoapoly make sense?
-        condition &= self._validate_spotlight_mode()
+        condition &= detailed_validation_checks(self)
         return condition
+
+    def is_valid(self, recursive=False, stack=False):
+        all_required = self._basic_validity_check()
+        if not recursive:
+            return all_required
+
+        valid_children = self._recursive_validity_check(stack=stack)
+        return all_required & valid_children
 
     def define_geo_image_corners(self, override=False):
         """
@@ -444,6 +382,45 @@ class SICDType(Serializable):
             # noinspection PyProtectedMember
             self.Radiometric._derive_parameters(self.Grid, self.SCPCOA)
 
+    def get_transmit_band_name(self):
+        """
+        Gets the processed transmit band name.
+
+        Returns
+        -------
+        str
+        """
+
+        if self.ImageFormation is None:
+            return 'UN'
+        return self.ImageFormation.get_transmit_band_name()
+
+    def get_processed_polarization_abbreviation(self):
+        """
+        Gets the processed polarization abbreviation (two letters).
+
+        Returns
+        -------
+        str
+        """
+
+        if self.ImageFormation is None:
+            return 'UN'
+        return self.ImageFormation.get_polarization_abbreviation()
+
+    def get_processed_polarization(self):
+        """
+        Gets the processed polarization.
+
+        Returns
+        -------
+        str
+        """
+
+        if self.ImageFormation is None:
+            return 'UN'
+        return self.ImageFormation.get_polarization()
+
     def apply_reference_frequency(self, reference_frequency):
         """
         If the reference frequency is used, adjust the necessary fields accordingly.
@@ -475,6 +452,25 @@ class SICDType(Serializable):
         if self.RMA is not None:
             # noinspection PyProtectedMember
             self.RMA._apply_reference_frequency(reference_frequency)
+
+    def get_ground_resolution(self):
+        """
+        Gets the ground resolution for the sicd.
+
+        Returns
+        -------
+        (float, float)
+        """
+
+        graze = numpy.deg2rad(self.SCPCOA.GrazeAng)
+        twist = numpy.deg2rad(self.SCPCOA.TwistAng)
+        row_ss = self.Grid.Row.SS
+        col_ss = self.Grid.Col.SS
+
+        row_ground = abs(float(row_ss/numpy.cos(graze)))
+        col_ground = float(numpy.sqrt((numpy.tan(graze)*numpy.tan(twist)*row_ss)**2
+                                      + (col_ss/numpy.cos(twist))**2))
+        return row_ground, col_ground
 
     def can_project_coordinates(self):
         """
@@ -623,7 +619,7 @@ class SICDType(Serializable):
             logging.error('Unhandled Grid.Type {}, unclear how to formulate a projection.'.format(self.Grid.Type))
             return False
 
-        logging.info('Consider calling sicd.define_coa_projection if the sicd structure is defined.')
+        # logging.info('Consider calling sicd.define_coa_projection if the sicd structure is defined.')
         return True
 
     def define_coa_projection(self, delta_arp=None, delta_varp=None, range_bias=None,
@@ -657,7 +653,7 @@ class SICDType(Serializable):
         if self._coa_projection is not None and not overide:
             return
 
-        self._coa_projection = point_projection.COAProjection(
+        self._coa_projection = point_projection.COAProjection.from_sicd(
             self, delta_arp=delta_arp, delta_varp=delta_varp, range_bias=range_bias,
             adj_params_frame=adj_params_frame)
 
@@ -671,7 +667,7 @@ class SICDType(Serializable):
         ----------
         coords : numpy.ndarray|tuple|list
             ECF coordinate to map to scene coordinates, of size `N x 3`.
-        kwargs : dict
+        kwargs
             The keyword arguments for the :func:`sarpy.geometry.point_projection.ground_to_image` method.
 
         Returns
@@ -687,7 +683,8 @@ class SICDType(Serializable):
         sarpy.geometry.point_projection.ground_to_image
         """
 
-        kwargs['use_sicd_coa'] = True
+        if 'use_structure_coa' not in kwargs:
+            kwargs['use_structure_coa'] = True
         return point_projection.ground_to_image(coords, self, **kwargs)
 
     def project_ground_to_image_geo(self, coords, ordering='latlong', **kwargs):
@@ -704,7 +701,7 @@ class SICDType(Serializable):
             If 'longlat', then the input is `[longitude, latitude, hae]`.
             Otherwise, the input is `[latitude, longitude, hae]`. Passed through
             to :func:`sarpy.geometry.geocoords.geodetic_to_ecf`.
-        kwargs : dict
+        kwargs
             The keyword arguments for the :func:`sarpy.geometry.point_projection.ground_to_image_geo` method.
 
         Returns
@@ -720,7 +717,8 @@ class SICDType(Serializable):
         sarpy.geometry.point_projection.ground_to_image_geo
         """
 
-        kwargs['use_sicd_coa'] = True
+        if 'use_structure_coa' not in kwargs:
+            kwargs['use_structure_coa'] = True
         return point_projection.ground_to_image_geo(coords, self, ordering=ordering, **kwargs)
 
     def project_image_to_ground(self, im_points, projection_type='HAE', **kwargs):
@@ -734,7 +732,7 @@ class SICDType(Serializable):
             the image coordinate array
         projection_type : str
             One of `['PLANE', 'HAE', 'DEM']`. Type `DEM` is a work in progress.
-        kwargs : dict
+        kwargs
             The keyword arguments for the :func:`sarpy.geometry.point_projection.image_to_ground` method.
 
         Returns
@@ -747,7 +745,8 @@ class SICDType(Serializable):
         sarpy.geometry.point_projection.image_to_ground
         """
 
-        kwargs['use_sicd_coa'] = True
+        if 'use_structure_coa' not in kwargs:
+            kwargs['use_structure_coa'] = True
         return point_projection.image_to_ground(
             im_points, self, projection_type=projection_type, **kwargs)
 
@@ -765,7 +764,7 @@ class SICDType(Serializable):
         ordering : str
             Determines whether return is ordered as `[lat, long, hae]` or `[long, lat, hae]`.
             Passed through to :func:`sarpy.geometry.geocoords.ecf_to_geodetic`.
-        kwargs : dict
+        kwargs
             The keyword arguments for the :func:`sarpy.geometry.point_projection.image_to_ground_geo` method.
 
         Returns
@@ -777,7 +776,8 @@ class SICDType(Serializable):
         sarpy.geometry.point_projection.image_to_ground_geo
         """
 
-        kwargs['use_sicd_coa'] = True
+        if 'use_structure_coa' not in kwargs:
+            kwargs['use_structure_coa'] = True
         return point_projection.image_to_ground_geo(
             im_points, self, ordering=ordering, projection_type=projection_type, **kwargs)
 
@@ -833,6 +833,7 @@ class SICDType(Serializable):
                 return
 
         if signal is None:
+            # noinspection PyBroadException
             try:
                 # use 1.0 for copolar collection and 0.25 from cross-polar collection
                 pol = self.ImageFormation.TxRcvPolarizationProc
@@ -854,6 +855,7 @@ class SICDType(Serializable):
             logging.error('Encountered an error estimating bandwidth area for RNIIRS. {}'.format(e))
             return
 
+        from sarpy.io.complex.utils import snr_to_rniirs
         inf_density, rniirs = snr_to_rniirs(bw_area, signal, noise)
         logging.info('Calculated INFORMATION_DENSITY = {0:0.5G}, '
                      'PREDICTED_RNIIRS = {1:0.5G}'.format(inf_density, rniirs))
@@ -861,6 +863,55 @@ class SICDType(Serializable):
             self.CollectionInfo.Parameters = []  # initialize
         self.CollectionInfo.Parameters['INFORMATION_DENSITY'] = '{0:0.2G}'.format(inf_density)
         self.CollectionInfo.Parameters['PREDICTED_RNIIRS'] = '{0:0.1f}'.format(rniirs)
+
+    def get_suggested_name(self, product_number=1):
+        """
+        Get the suggested name stem for the sicd and derived data.
+
+        Returns
+        -------
+        str
+        """
+
+        sugg_name = get_sicd_name(self, product_number)
+        if sugg_name is not None:
+            return sugg_name
+        elif self.CollectionInfo.CoreName is not None:
+            return self.CollectionInfo.CoreName
+        return 'Unknown_Sicd{}'.format(product_number)
+
+    def get_des_details(self, check_version1_compliance=False):
+        """
+        Gets the correct current SICD DES subheader details.
+
+        Parameters
+        ----------
+        check_version1_compliance : bool
+            If true and structure is compatible, the version 1.1 information will
+            be returned. Otherwise, the most recent supported version will be
+            returned .
+
+        Returns
+        -------
+        dict
+        """
+
+        if check_version1_compliance and (
+                (self.ImageFormation is None or self.ImageFormation.permits_version_1_1()) and
+                (self.RadarCollection is None or self.RadarCollection.permits_version_1_1())):
+            spec_version = _SICD_SPECIFICATION_VERSION_1_1
+            spec_date = _SICD_SPECIFICATION_DATE_1_1
+            spec_ns = _SICD_SPECIFICATION_NAMESPACE_1_1
+        else:
+            spec_version = _SICD_SPECIFICATION_VERSION_1_2
+            spec_date = _SICD_SPECIFICATION_DATE_1_2
+            spec_ns = _SICD_SPECIFICATION_NAMESPACE_1_2
+
+        return OrderedDict([
+            ('DESSHSI', _SICD_SPECIFICATION_IDENTIFIER),
+            ('DESSHSV', spec_version),
+            ('DESSHSD', spec_date),
+            ('DESSHTN', spec_ns)])
 
     def copy(self):
         """
@@ -874,93 +925,13 @@ class SICDType(Serializable):
         out = super(SICDType, self).copy()
         if hasattr(self, '_NITF'):
             out._NITF = copy.deepcopy(self._NITF)
+        out.derive()
         return out
 
-    def get_suggested_name(self, product_number=1):
-        """
-        Get the suggested name stem for the sicd and derived data.
+    def to_xml_bytes(self, urn=None, tag='SICD', check_validity=False, strict=DEFAULT_STRICT):
+        if urn is None:
+            urn = _SICD_SPECIFICATION_NAMESPACE_1_2
+        return super(SICDType, self).to_xml_bytes(urn=urn, tag=tag, check_validity=check_validity, strict=strict)
 
-        Returns
-        -------
-        str
-        """
-
-        def get_commercial_id(prod):
-            _cdate_str = cdate.strftime('%d%b%y')
-            _collector = self.CollectionInfo.CollectorName.strip()
-            _mins = cdate.hour * 60 + cdate.minute + cdate.second / 60.
-            if _collector.startswith('CSK'):
-                _crad = 'CS'
-                _cvehicle = _collector[3:5]
-                _pass = '{0:02d}'.format(int(round(_mins*14.8125/1440.)))
-            elif _collector in ('RADARSAT-1', 'RADARSAT-2'):
-                _crad = 'RS'
-                _cvehicle = '0'+_collector[-1]
-                _pass = '{0:02d}'.format(int(round(_mins*14.292/1440.)))
-            elif _collector.startswith('RCM'):
-                _crad = 'RC'
-                _cvehicle = '{0:02d}'.format(int(re.sub('-', '', _collector[3:])))
-                _pass = '{0:02d}'.format(int(round(_mins*14.292/1440.)))  # not sure what to put here
-            elif _collector.startswith('SENTINEL') or _collector.startswith('S1'):
-                _crad = 'SE'
-                _cvehicle = self.CollectionInfo.CollectorName[-2:]
-                _pass = '00'
-            elif _collector.lower().startswith('terra') or _collector.lower().startswith('tsx'):
-                _crad = 'TS'
-                _cvehicle = '01'
-                _pass = '{0:02d}'.format(int(round(_mins*15.182/1440.)))
-            elif _collector.lower().startswith('tan') or _collector.lower().startswith('tdx'):
-                _crad = 'TD'
-                _cvehicle = '01'
-                _pass = '{0:02d}'.format(int(round(_mins*15.182/1440.)))
-            elif _collector.lower().startswith('nisar'):
-                _crad = 'NI'
-                _cvehicle = '01'
-                _pass = '{0:02d}'.format(int(round(_mins*14.4167/1440.)))
-            else:
-                logging.error('Got unknown collector {}. Setting collector vehicle to 00.'.format(_collector))
-                _crad = 'UN'
-                _cvehicle = '00'
-                _pass = '00'
-
-            return '{0:s}{1:s}{2:s}{3:s}{4:03d}'.format(_cdate_str, _crad, _cvehicle, _pass, prod)
-
-        def get_vendor_id():
-            _time_str = cdate.strftime('%H%M%S')
-            _mode = '{}{}{}'.format(self.CollectionInfo.RadarMode.get_mode_abbreviation(),
-                                    self.Grid.get_resolution_abbreviation(),
-                                    self.SCPCOA.SideOfTrack)
-            _coords = self.GeoData.SCP.get_image_center_abbreviation()
-            _freq_band = self.RadarCollection.TxFrequency.get_band_abbreviation()
-            _pol = '{}{}'.format(
-                self.RadarCollection.get_polarization_abbreviation(),
-                self.ImageFormation.get_polarization_abbreviation())
-            return '_{}_{}_{}_001{}_{}_0101_SPY'.format(_time_str, _mode, _coords, _freq_band, _pol)
-
-        cdate = self.Timeline.CollectStart.astype(datetime)
-
-        try:
-            return get_commercial_id(product_number) + get_vendor_id()
-        except AttributeError:
-            logging.error('Failed to construct suggested name.')
-            return None
-
-    @staticmethod
-    def get_des_details():
-        """
-        Gets the correct SIDD 2.0 DES subheader details.
-
-        Returns
-        -------
-        dict
-        """
-
-        return OrderedDict([
-            ('DESSHSI', _SICD_SPECIFICATION_IDENTIFIER),
-            ('DESSHSV', _SICD_SPECIFICATION_VERSION),
-            ('DESSHSD', _SICD_SPECIFICATION_DATE),
-            ('DESSHTN', _SICD_SPECIFICATION_NAMESPACE)])
-
-    def to_xml_bytes(self, urn=None, tag=None, check_validity=False, strict=DEFAULT_STRICT):
-        return super(SICDType, self).to_xml_bytes(
-            urn=_SICD_SPECIFICATION_NAMESPACE, tag=tag, check_validity=check_validity, strict=strict)
+    def to_xml_string(self, urn=None, tag='SICD', check_validity=False, strict=DEFAULT_STRICT):
+        return self.to_xml_bytes(urn=urn, tag=tag, check_validity=check_validity, strict=strict).decode('utf-8')

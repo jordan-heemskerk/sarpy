@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-This module provide utilities for converting from any complex format that we can
-read to SICD or SIO format. The same conversion utility can be used to subset data.
+This module provide utilities for opening any files analogous to Sensor
+Independent Derived Data, namely detected images in the ground plane.
 """
 
 import os
@@ -9,7 +9,7 @@ import sys
 import pkgutil
 from importlib import import_module
 
-from ..general.base import BaseReader
+from sarpy.io.general.base import BaseReader
 
 
 __classification__ = "UNCLASSIFIED"

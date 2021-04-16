@@ -4,24 +4,25 @@ Module for reading and writing SIDD files - should support SIDD version 1.0 and 
 """
 
 import logging
+import sys
 from functools import reduce
-from datetime import datetime
 import re
+from typing import List, Union
 
 import numpy
 
 from sarpy.compliance import int_func, string_types
-from ..general.utils import parse_xml_from_string
-from ..general.nitf import NITFReader, NITFWriter, ImageDetails, DESDetails, \
+from sarpy.io.general.utils import parse_xml_from_string
+from sarpy.io.general.base import AggregateChipper
+from sarpy.io.general.nitf import NITFDetails, NITFReader, NITFWriter, ImageDetails, DESDetails, \
     image_segmentation, get_npp_block, interpolate_corner_points_string
-from ..general.nitf import NITFDetails
-from ..general.nitf_elements.des import DataExtensionHeader, XMLDESSubheader
-from ..general.nitf_elements.security import NITFSecurityTags
-from ..general.nitf_elements.image import ImageSegmentHeader, ImageBands, ImageBand
-from .sidd2_elements.SIDD import SIDDType
-from .sidd1_elements.SIDD import SIDDType as SIDDType1
-from ..complex.sicd_elements.SICD import SICDType
-from ..complex.sicd import MultiSegmentChipper, extract_clas as extract_clas_sicd
+from sarpy.io.general.nitf_elements.des import DataExtensionHeader, XMLDESSubheader
+from sarpy.io.general.nitf_elements.security import NITFSecurityTags
+from sarpy.io.general.nitf_elements.image import ImageSegmentHeader, ImageBands, ImageBand
+from sarpy.io.product.sidd2_elements.SIDD import SIDDType
+from sarpy.io.product.sidd1_elements.SIDD import SIDDType as SIDDType1
+from sarpy.io.complex.sicd_elements.SICD import SICDType
+from sarpy.io.complex.sicd import extract_clas as extract_clas_sicd
 
 
 __classification__ = "UNCLASSIFIED"
@@ -55,7 +56,7 @@ def is_a(file_name):
     try:
         nitf_details = SIDDDetails(file_name)
         if nitf_details.is_sidd:
-            print('File {} is determined to be a SIDD (NITF format) file.'.format(file_name))
+            logging.info('File {} is determined to be a SIDD (NITF format) file.'.format(file_name))
             return SIDDReader(nitf_details)
         else:
             return None
@@ -189,42 +190,14 @@ class SIDDDetails(NITFDetails):
 #######
 #  The actual reading implementation
 
-def _validate_lookup(lookup_table):
-    # type: (numpy.ndarray) -> None
-    if not isinstance(lookup_table, numpy.ndarray):
-        raise ValueError('requires a numpy.ndarray, got {}'.format(type(lookup_table)))
-    if lookup_table.dtype.name != 'uint8':
-        raise ValueError('requires a numpy.ndarray of uint8 dtype, got {}'.format(lookup_table.dtype))
-
-
-def rgb_lut_conversion(lookup_table):
-    """
-    This constructs the function to convert from RGB/LUT format data to RGB data.
-
-    Parameters
-    ----------
-    lookup_table : numpy.ndarray
-
-    Returns
-    -------
-    callable
-    """
-
-    _validate_lookup(lookup_table)
-
-    def converter(data):
-        if not isinstance(data, numpy.ndarray):
-            raise ValueError('requires a numpy.ndarray, got {}'.format(type(data)))
-
-        if data.dtype.name not in ['uint8', 'uint16']:
-            raise ValueError('requires a numpy.ndarray of uint8 or uint16 dtype, '
-                             'got {}'.format(data.dtype.name))
-
-        if len(data.shape) == 3 and data.shape[2] != 1:
-            raise ValueError('Requires a three-dimensional numpy.ndarray (with band '
-                             'in the last dimension), got shape {}'.format(data.shape))
-        return lookup_table[data[:, :, 0]]
-    return converter
+def _check_iid_format(iid1, i):
+    if sys.version_info[0] > 2:
+        if not (iid1[:4] == 'SIDD' and iid1[4:].isnumeric()):
+            raise ValueError('Got poorly formatted image segment id {} at position {}'.format(iid1, i))
+    else:
+        # noinspection PyUnresolvedReferences
+        if not (iid1[:4] == 'SIDD' and unicode(iid1[4:]).isnumeric()):
+            raise ValueError('Got poorly formatted image segment id {} at position {}'.format(iid1, i))
 
 
 class SIDDReader(NITFReader):
@@ -253,8 +226,9 @@ class SIDDReader(NITFReader):
             raise ValueError(
                 'The input file passed in appears to be a NITF 2.1 file that does not contain '
                 'valid sidd metadata.')
-        super(SIDDReader, self).__init__(nitf_details, is_sicd_type=False)
+        self._nitf_details = nitf_details
         self._sidd_meta = self.nitf_details.sidd_meta
+        super(SIDDReader, self).__init__(nitf_details, reader_type="SIDD")
 
     @property
     def nitf_details(self):
@@ -267,6 +241,7 @@ class SIDDReader(NITFReader):
 
     @property
     def sidd_meta(self):
+        # type: () -> Union[List[SIDDType], List[SIDDType1]]
         """
         None|List[sarpy.io.product.sidd2_elements.SIDD.SIDDType]: the sidd meta-data structure(s).
         """
@@ -275,15 +250,14 @@ class SIDDReader(NITFReader):
 
     def _find_segments(self):
         # determine image segmentation from image headers
-        segments = [[] for sidd in self._sidd_meta]
+        segments = [[] for _ in self._sidd_meta]
         for i, img_header in enumerate(self.nitf_details.img_headers):
             # skip anything but SAR for now (i.e. legend)
             if img_header.ICAT != 'SAR':
                 continue
 
             iid1 = img_header.IID1  # required to be of the form SIDD######
-            if not (iid1[:4] == 'SIDD' and iid1[4:].isnumeric()):
-                raise ValueError('Got poorly formatted image segment id {} at position {}'.format(iid1, i))
+            _check_iid_format(iid1, i)
             element = int_func(iid1[4:7])
             if element > len(self._sidd_meta):
                 raise ValueError('Got image segment id {}, but there are only {} '
@@ -296,52 +270,26 @@ class SIDDReader(NITFReader):
         return segments
 
     def _check_img_details(self, segment):
-        this_dtype, this_bands, this_lut = None, None, None
-        for i, this_index in enumerate(segment):
-            img_header = self.nitf_details.img_headers[this_index]
-            abpp = img_header.ABPP
-            if abpp not in [8, 16]:
-                raise ValueError('Image header at index {} has ABPP {}. Unsupported.'.format(this_index, abpp))
-            # check image type
-            irep = img_header.IREP
-            if irep not in ['MONO', 'RGB/LUT', 'RGB']:
-                raise ValueError('Image header at index {} has IREP {}, which is '
-                                 'unsupported'.format(this_index, irep))
-            bands = len(img_header.Bands)
-            if (irep == 'RGB' and bands != 3) or (irep != 'RGB' and bands != 1):
-                    raise ValueError('Image header at index {} has IREP {} and {} Bands. '
-                                         'This is unsupported.'.format(this_index, irep, bands))
-            # Fetch lookup table
-            lut = img_header.Bands[0].LUTD if irep == 'RGB/LUT' else None
-
-            # determine dtype
-            if lut is None:
-                if abpp == 8:
-                    dtype = numpy.dtype('>uint8')
-                else:
-                    dtype = numpy.dtype('>uint16')
-            else:
-                dtype = numpy.dtype('>uint8')
-
-            if i == 0:
-                this_dtype = dtype
-                this_bands = bands
-                this_lut = lut
-            else:
-                if dtype != this_dtype:
-                    raise ValueError('Image segments {} form one sidd, but have differing type '
-                                     'parameters'.format(segment))
-                if bands != this_bands:
-                    raise ValueError('Image segments {} form one sidd, but have differing '
-                                     'band counts'.format(segment))
-                if (this_lut is None and lut is not None) or (this_lut is not None and lut is None):
-                    raise ValueError('Image segments {} form one sidd, but have differing '
-                                     'look up table information'.format(segment))
-                if (this_lut is not None and lut is not None) and \
-                        (this_lut.shape != lut.shape or numpy.any(this_lut != lut)):
-                    raise ValueError('Image segments {} form one sidd, but have differing '
-                                     'look up table information'.format(segment))
-        return this_dtype, this_bands, this_lut
+        raw_dtype, output_dtype, raw_bands, output_bands, transform_data = self._extract_chipper_params(segment[0])
+        for this_index in segment[1:]:
+            this_raw_dtype, this_output_dtype, this_raw_bands, this_output_bands, _ = self._extract_chipper_params(this_index)
+            if this_raw_dtype.name != raw_dtype.name:
+                raise ValueError(
+                    'Segments at index {} and {} have incompatible data types '
+                    '{} and {}'.format(segment[0], this_index, raw_dtype, this_raw_dtype))
+            if this_output_dtype.name != output_dtype.name:
+                raise ValueError(
+                    'Segments at index {} and {} have incompatible output data types '
+                    '{} and {}'.format(segment[0], this_index, output_dtype, this_output_dtype))
+            if this_raw_bands != raw_bands:
+                raise ValueError(
+                    'Segments at index {} and {} have incompatible input bands '
+                    '{} and {}'.format(segment[0], this_index, raw_bands, this_raw_bands))
+            if this_output_bands != output_bands:
+                raise ValueError(
+                    'Segments at index {} and {} have incompatible output bands '
+                    '{} and {}'.format(segment[0], this_index, output_bands, this_output_bands))
+        return raw_dtype, output_dtype, raw_bands, output_bands, transform_data
 
     def _construct_chipper(self, segment, index):
         # get the image size
@@ -349,13 +297,25 @@ class SIDDReader(NITFReader):
         rows = sidd.Measurement.PixelFootprint.Row
         cols = sidd.Measurement.PixelFootprint.Col
 
-        bounds, offsets = self._get_chipper_partitioning(segment, rows, cols)
-        dtype, bands, lut = self._check_img_details(segment)
-        complex_type = False if lut is None else rgb_lut_conversion(lut)
-        return MultiSegmentChipper(
-            self.file_name, bounds, offsets, dtype,
-            symmetry=(False, False, False), complex_type=complex_type, bands_ip=bands)
+        # extract the basic elements for the chippers
+        raw_dtype, output_dtype, raw_bands, output_bands, transform_data = self._check_img_details(segment)
+        if len(segment) == 1:
+            return self._define_chipper(
+                segment[0], raw_dtype=raw_dtype, raw_bands=raw_bands, transform_data=transform_data,
+                output_dtype=output_dtype, output_bands=output_bands)
+        else:
+            # get the bounds definition
+            bounds = self._get_chipper_partitioning(segment, rows, cols)
+            # define the chippers
+            chippers = [
+                self._define_chipper(img_index, raw_dtype=raw_dtype, raw_bands=raw_bands, transform_data=transform_data,
+                                     output_dtype=output_dtype, output_bands=output_bands) for img_index in segment]
+            # define the aggregate chipper
+            return AggregateChipper(bounds, output_dtype, chippers, output_bands=output_bands)
 
+
+#########
+# The writer implementation
 
 def validate_sidd_for_writing(sidd_meta):
     """
@@ -367,7 +327,7 @@ def validate_sidd_for_writing(sidd_meta):
 
     Returns
     -------
-    Tuple[SIDDType, SIDDType1]
+    Tuple[Union[SIDDType, SIDDType1]]
     """
 
     def inspect_sidd(the_sidd):
@@ -393,7 +353,7 @@ def validate_sidd_for_writing(sidd_meta):
         # we must have collection time
         if the_sidd.ExploitationFeatures is None:
             raise ValueError('The sidd_meta has un-populated ExploitationFeatures.')
-        if the_sidd.ExploitationFeatures.Collections is None or the_sidd.ExploitationFeatures.Collections.size == 0:
+        if the_sidd.ExploitationFeatures.Collections is None or len(the_sidd.ExploitationFeatures.Collections) == 0:
             raise ValueError('The sidd_meta has un-populated ExploitationFeatures.Collections.')
         if the_sidd.ExploitationFeatures.Collections[0].Information is None:
             raise ValueError('The sidd_meta has un-populated ExploitationFeatures.Collections.Information.')
@@ -507,7 +467,7 @@ class SIDDWriter(NITFWriter):
 
     __slots__ = ('_sidd_meta', '_sicd_meta', )
 
-    def __init__(self, file_name, sidd_meta, sicd_meta):
+    def __init__(self, file_name, sidd_meta, sicd_meta, check_existence=True):
         """
 
         Parameters
@@ -515,17 +475,20 @@ class SIDDWriter(NITFWriter):
         file_name : str
         sidd_meta : SIDDType|List[SIDDType]|SIDDType1|List[SIDDType1]
         sicd_meta : SICDType|List[SICDType]
+        check_existence : bool
+            Should we check if the given file already exists, and raises an exception if so?
         """
 
+        self._shapes = None
         self._sidd_meta = validate_sidd_for_writing(sidd_meta)
-        # self._shapes = ((self.sicd_meta.ImageData.NumRows, self.sicd_meta.ImageData.NumCols), )
+        self._set_shapes()
         self._sicd_meta = validate_sicd_for_writing(sicd_meta)
         self._security_tags = None
         self._nitf_header = None
         self._img_groups = None
         self._img_details = None
         self._des_details = None
-        super(SIDDWriter, self).__init__(file_name)
+        super(SIDDWriter, self).__init__(file_name, check_existence=check_existence)
 
     @property
     def sidd_meta(self):
@@ -542,6 +505,12 @@ class SIDDWriter(NITFWriter):
         """
 
         return self._sicd_meta
+
+    def _set_shapes(self):
+        if isinstance(self._sidd_meta, tuple):
+            self._shapes = tuple((entry.Measurement.PixelFootprint.Row, entry.Measurement.PixelFootprint.Col) for entry in self._sidd_meta)
+        else:
+            self._shapes = ((self._sidd_meta.Measurement.PixelFootprint.Row, self._sidd_meta.Measurement.PixelFootprint.Col), )
 
     def _get_security_tags(self, index):
         """
@@ -561,7 +530,6 @@ class SIDDWriter(NITFWriter):
         if sidd.ProductCreation is not None and sidd.ProductCreation.Classification is not None:
             args['CLAS'] = extract_clas(sidd)
             args['CLSY'] = extract_clsy(sidd)
-            # TODO: this should be more robust
         return NITFSecurityTags(**args)
 
     def _create_security_tags(self):
@@ -599,7 +567,9 @@ class SIDDWriter(NITFWriter):
         sidd = self.sidd_meta[index]
 
         iid2 = None
+        # noinspection PyProtectedMember
         if hasattr(sidd, '_NITF') and isinstance(sidd._NITF, dict):
+            # noinspection PyProtectedMember
             iid2 = sidd._NITF.get('SUGGESTED_NAME', None)
         if iid2 is None:
             iid2 = 'SIDD: Unknown'
@@ -619,7 +589,9 @@ class SIDDWriter(NITFWriter):
     def _get_ostaid(self):
         ostaid = 'Unknown'
         sidd = self.sidd_meta[0]
+        # noinspection PyProtectedMember
         if hasattr(sidd, '_NITF') and isinstance(sidd._NITF, dict):
+            # noinspection PyProtectedMember
             ostaid = sidd._NITF.get('OSTAID', 'Unknown')
         return ostaid
 
@@ -637,9 +609,10 @@ class SIDDWriter(NITFWriter):
             pixel_size - the size of each pixel in bytes.
             abpp - the actual bits per pixel.
             irep - the image representation
-            dtype - the data type.
-            complex_type -
+            raw_dtype - the data type.
+            transform_data -
             pv_type - the pixel type string.
+            band_count - the number of bands
             irepband - the image representation.
             im_segments - Segmentation of the form `((row start, row end, column start, column end))`
         """
@@ -650,32 +623,35 @@ class SIDDWriter(NITFWriter):
             pixel_size = 1
             abpp = 8
             irep = 'MONO'
-            dtype = numpy.dtype('>u1')
-            complex_type = False
+            raw_dtype = numpy.dtype('>u1')
+            transform_data = None
             pv_type = 'INT'
+            band_count = 1
             irepband = ('M', )
         elif sidd.Display.PixelType == 'MONO16I':
             pixel_size = 2
             abpp = 16
             irep = 'MONO'
-            dtype = numpy.dtype('>u1')
-            complex_type = False
+            raw_dtype = numpy.dtype('>u1')
+            transform_data = None
             pv_type = 'INT'
+            band_count = 1
             irepband = ('M', )
         elif sidd.Display.PixelType == 'RGB24I':
             pixel_size = 3
             abpp = 8
             irep = 'RGB'
-            dtype = numpy.dtype('>u1')
-            complex_type = False
+            raw_dtype = numpy.dtype('>u1')
+            transform_data = None
             pv_type = 'INT'
+            band_count = 3
             irepband = ('R', 'G', 'B')
         else:
             raise ValueError('Unsupported PixelType {}'.format(sidd.Display.PixelType))
 
         image_segment_limits = image_segmentation(
             sidd.Measurement.PixelFootprint.Row, sidd.Measurement.PixelFootprint.Col, pixel_size)
-        return pixel_size, abpp, irep, dtype, complex_type, pv_type, irepband, image_segment_limits
+        return pixel_size, abpp, irep, raw_dtype, transform_data, pv_type, band_count, irepband, image_segment_limits
 
     @staticmethod
     def _get_icp(sidd):
@@ -701,7 +677,7 @@ class SIDDWriter(NITFWriter):
 
     def _create_image_segment(self, index, img_groups, img_details):
         cur_count = len(img_details)
-        pixel_size, abpp, irep, dtype, complex_type, pv_type, irepband, \
+        pixel_size, abpp, irep, raw_dtype, transform_data, pv_type, band_count, irepband, \
             image_segment_limits = self._image_parameters(index)
         new_count = len(image_segment_limits)
         img_groups.append(tuple(range(cur_count, cur_count+new_count)))
@@ -737,7 +713,7 @@ class SIDDWriter(NITFWriter):
                 PVTYPE=pv_type,
                 ABPP=abpp,
                 IGEOLO=interpolate_corner_points_string(numpy.array(entry, dtype=numpy.int64), rows, cols, icp),
-                IMODE='P' if irep == 'RGB' else 'B',
+                IMODE='P',
                 NPPBH=get_npp_block(this_cols),
                 NPPBV=get_npp_block(this_rows),
                 NBPP=abpp,
@@ -746,7 +722,7 @@ class SIDDWriter(NITFWriter):
                 ILOC='{0:05d}{1:05d}'.format(entry[0], entry[2]),
                 Bands=ImageBands(values=bands),
                 Security=security)
-            img_details.append(ImageDetails(1, dtype, complex_type, entry, subhead))
+            img_details.append(ImageDetails(band_count, raw_dtype, transform_data, entry, subhead))
 
     def _create_image_segment_details(self):
         super(SIDDWriter, self)._create_image_segment_details()
@@ -757,9 +733,9 @@ class SIDDWriter(NITFWriter):
         self._img_groups = tuple(img_groups)
         self._img_details = tuple(img_details)
 
-    def _create_des_segment(self, index):
+    def _create_sidd_des_segment(self, index):
         """
-        Create the details for the data extension at `index`.
+        Create the details for the sidd data extension at `index`.
 
         Parameters
         ----------
@@ -776,9 +752,9 @@ class SIDDWriter(NITFWriter):
         uh_args = sidd.get_des_details()
 
         try:
-            desshdt = str(sidd.ProductCreation.ProcessorInformation.ProcessingDateTime)
+            desshdt = str(sidd.ProductCreation.ProcessorInformation.ProcessingDateTime.astype('datetime64[s]'))
         except AttributeError:
-            desshdt = str(numpy.datetime64(datetime.now()))
+            desshdt = str(numpy.datetime64('now'))
         if desshdt[-1] != 'Z':
             desshdt += 'Z'
         uh_args['DESSHDT'] = desshdt
@@ -797,6 +773,50 @@ class SIDDWriter(NITFWriter):
             UserHeader=XMLDESSubheader(**uh_args))
         return DESDetails(subhead, sidd.to_xml_bytes(tag='SIDD'))
 
+    def _create_sicd_des_segment(self, index):
+        """
+        Create the details for the sicd data extension at `index`.
+
+        Parameters
+        ----------
+        index : int
+
+        Returns
+        -------
+        DESDetails
+        """
+
+        security_tags = self.security_tags
+        sicd = self.sicd_meta[index]
+        uh_args = sicd.get_des_details(check_version1_compliance=True)
+        desshdt = str(sicd.ImageCreation.DateTime.astype('datetime64[s]'))
+        if desshdt[-1] != 'Z':
+            desshdt += 'Z'
+        uh_args['DESSHDT'] = desshdt
+
+        desshlpg = ''
+        if sicd.GeoData is not None and sicd.GeoData.ImageCorners is not None:
+            # noinspection PyTypeChecker
+            icp = sicd.GeoData.ImageCorners.get_array(dtype=numpy.float64)
+            temp = []
+            for entry in icp:
+                temp.append('{0:0=+12.8f}{1:0=+13.8f}'.format(entry[0], entry[1]))
+            temp.append(temp[0])
+            desshlpg = ''.join(temp)
+        uh_args['DESSHLPG'] = desshlpg
+
+        subhead = DataExtensionHeader(
+            Security=security_tags,
+            UserHeader=XMLDESSubheader(**uh_args))
+
+        return DESDetails(subhead, sicd.to_xml_bytes(tag='SICD', urn=uh_args['DESSHTN']))
+
     def _create_data_extension_details(self):
         super(SIDDWriter, self)._create_data_extension_details()
-        self._des_details = tuple(self._create_des_segment(index) for index in range(len(self.sidd_meta)))
+        des_details = []
+        for index in range(len(self.sidd_meta)):
+            des_details.append(self._create_sidd_des_segment(index))
+        if self.sicd_meta is not None:
+            for index in range(len(self.sicd_meta)):
+                des_details.append(self._create_sicd_des_segment(index))
+        self._des_details = tuple(des_details)

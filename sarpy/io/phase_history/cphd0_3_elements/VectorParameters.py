@@ -4,11 +4,12 @@ The SRP definition for CPHD 0.3.
 """
 
 from typing import Union
+import numpy
 
 from sarpy.compliance import integer_types
-from ..cphd1_elements.base import DEFAULT_STRICT
+from sarpy.io.phase_history.cphd1_elements.base import DEFAULT_STRICT
 # noinspection PyProtectedMember
-from ...complex.sicd_elements.base import Serializable, _SerializableDescriptor, \
+from sarpy.io.complex.sicd_elements.base import Serializable, _SerializableDescriptor, \
     _IntegerEnumDescriptor
 
 
@@ -85,6 +86,17 @@ class FxParametersType(Serializable):
                 out += val
         return None
 
+    def get_dtype_components(self):
+        """
+        Gets the dtype components.
+
+        Returns
+        -------
+        List[Tuple]
+        """
+
+        return [(entry, '>f8') for entry in self._fields]
+
 
 class TOAParametersType(Serializable):
     """
@@ -147,6 +159,17 @@ class TOAParametersType(Serializable):
                 out += val
         return None
 
+    def get_dtype_components(self):
+        """
+        Gets the dtype components.
+
+        Returns
+        -------
+        List[Tuple]
+        """
+
+        return [(entry, '>f8') for entry in self._fields]
+
 
 class VectorParametersType(Serializable):
     """
@@ -158,7 +181,7 @@ class VectorParametersType(Serializable):
         'FxParameters', 'TOAParameters')
     _required = (
         'TxTime', 'TxPos', 'RcvTime', 'RcvPos', 'SRPPos')
-    _choice = [{'required': False, 'collection': ('FxParameters', 'TOAParameters')}]
+    _choice = ({'required': False, 'collection': ('FxParameters', 'TOAParameters')}, )
     # descriptors
     TxTime = _IntegerEnumDescriptor(
         'TxTime', (8, ), _required, strict=DEFAULT_STRICT, default_value=8,
@@ -285,3 +308,30 @@ class VectorParametersType(Serializable):
             else:
                 raise TypeError('Got unhandled type {}'.format(type(val)))
         return None
+
+    def get_vector_dtype(self):
+        """
+        Gets the dtype for the corresponding structured array for the full PVP array.
+
+        Returns
+        -------
+        numpy.dtype
+            This will be a compound dtype for a structured array.
+        """
+
+        the_type_info = []
+        for fld in self._fields:
+            val = getattr(self, fld)
+            if val is None:
+                continue
+            if fld in ['FxParameters', 'TOAParameters']:
+                the_type_info.extend(val.get_dtype_components())
+            else:
+                assert isinstance(val, integer_types), 'CPHD 0.3 PVP field {} should be an integer, got {}'.format(fld, val)
+                if val == 8:
+                    the_type_info.append((fld, '>f8'))
+                elif val == 24:
+                    the_type_info.append((fld, '>f8', (3, )))
+                else:
+                    raise ValueError('Got unhandled value {} for CPHD 0.3 PVP field {}'.format(val, fld))
+        return numpy.dtype(the_type_info)

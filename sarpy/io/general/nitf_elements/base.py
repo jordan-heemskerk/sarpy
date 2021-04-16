@@ -6,11 +6,17 @@ Base NITF Header functionality definition.
 import logging
 from weakref import WeakKeyDictionary
 from typing import Union, List, Tuple
+from collections import OrderedDict
+import struct
 
 import numpy
 
 from sarpy.compliance import int_func, integer_types, string_types, bytes_to_string
 from .tres.registration import find_tre
+
+
+__classification__ = "UNCLASSIFIED"
+__author__ = "Thomas McCullough"
 
 
 # Base NITF type
@@ -69,6 +75,17 @@ class BaseNITFElement(object):
 
         raise NotImplementedError
 
+    def to_json(self):
+        """
+        Serialize element to a json representation. This is intended to allow
+        a simple presentation of the element.
+
+        Returns
+        -------
+        dict
+        """
+
+        raise NotImplementedError
 
 # Basic input and output interpreters
 
@@ -140,7 +157,7 @@ def _parse_str(val, length, default, name, instance):
     elif not isinstance(val, string_types):
         val = str(val)
 
-    val = val.strip()
+    val = val.rstrip()
     if len(val) <= length:
         return val
     else:
@@ -442,10 +459,15 @@ class _NITFElementDescriptor(_BasicDescriptor):
 class NITFElement(BaseNITFElement):
     _ordering = ()
     _lengths = {}
+    _binary_format = {}
 
     def __init__(self, **kwargs):
         for fld in self._ordering:
-            setattr(self, fld, kwargs.get(fld, None))
+            try:
+                setattr(self, fld, kwargs.get(fld, None))
+            except:
+                logging.critical('Failed setting attribute {} for class {}'.format(fld, self.__class__))
+                raise
 
     @classmethod
     def minimum_length(cls):
@@ -483,6 +505,8 @@ class NITFElement(BaseNITFElement):
         val = getattr(self, fld)
         if isinstance(val, BaseNITFElement):
             return val.to_bytes()
+        elif fld in self._binary_format:
+            return struct.pack(self._binary_format[fld], val)
         elif fld in self._lengths:
             return _get_bytes(val, self._lengths[fld])
         else:
@@ -537,7 +561,15 @@ class NITFElement(BaseNITFElement):
 
         if attribute in fields:
             return start
-        if attribute in cls._lengths:
+        if attribute in cls._binary_format:
+            if attribute not in cls._lengths:
+                raise ValueError(
+                    'attribute {} has binary format specified, but no length specified '
+                    'for class {}'.format(attribute, cls))
+            end = start + cls._lengths[attribute]
+            fields[attribute] = struct.unpack(cls._binary_format[attribute], value[start:end])[0]
+            return end
+        elif attribute in cls._lengths:
             end = start + cls._lengths[attribute]
             fields[attribute] = value[start:end]
             return end
@@ -548,7 +580,7 @@ class NITFElement(BaseNITFElement):
             fields[attribute] = the_value
             return start + the_value.get_bytes_length()
         else:
-            raise ValueError('Cannot parse attribute {}'.format(attribute))
+            raise ValueError('Cannot parse attribute {} for class {}'.format(attribute, cls))
 
     @classmethod
     def from_bytes(cls, value, start):
@@ -571,6 +603,25 @@ class NITFElement(BaseNITFElement):
         for fld in cls._ordering:
             loc = cls._parse_attribute(fields, fld, value, loc)
         return cls(**fields)
+
+    def to_json(self):
+        out = OrderedDict()
+        for fld in self._ordering:
+            if self._get_attribute_length(fld) == 0:
+                continue
+            value = getattr(self, fld)
+            if value is None:
+                out[fld] = ''
+            elif isinstance(value, string_types) or isinstance(value, integer_types) \
+                    or isinstance(value, bytes):
+                out[fld] = value
+            elif isinstance(value, BaseNITFElement):
+                out[fld] = value.to_json()
+            else:
+                logging.error(
+                    'Got unhandled type `{}` for json serialization for '
+                    'attribute `{}` of class {}'.format(type(value), fld, self.__class__))
+        return out
 
 
 class NITFLoop(NITFElement):
@@ -645,6 +696,9 @@ class NITFLoop(NITFElement):
     def to_bytes(self):
         return self._counts_bytes() + b''.join(entry.to_bytes() for entry in self._values)
 
+    def to_json(self):
+        return [entry.to_json() for entry in self._values]
+
 
 class Unstructured(NITFElement):
     """
@@ -714,7 +768,9 @@ class Unstructured(NITFElement):
             if isinstance(data, bytes):
                 return siz_frm.format(len(data)).encode('utf-8') + data
             else:
-                raise TypeError('Got unexpected data type {}'.format(type(data)))
+                raise TypeError(
+                    'Got unexpected data type {} for attribute {} of class {}'.format(
+                        type(data), attribute, self.__class__))
         return super(Unstructured, self)._get_attribute_bytes(attribute)
 
     def _get_attribute_length(self, attribute):
@@ -823,7 +879,12 @@ class _ItemArrayHeaders(BaseNITFElement):
         item_frm = '{0:0' + str(self._item_len) + 'd}'
         for sh_off, it_off in zip(self.subhead_sizes, self.item_sizes):
             out += subh_frm.format(sh_off) + item_frm.format(it_off)
-        return out.encode()
+        return out.encode('utf-8')
+
+    def to_json(self):
+        return OrderedDict([
+            ('subheader_sizes', self.subhead_sizes.tolist()),
+            ('item_sizes', self.item_sizes.tolist())])
 
 
 ######
@@ -877,9 +938,17 @@ class TRE(BaseNITFElement):
                 return known_tre.from_bytes(value, start)
             except Exception as e:
                 logging.error(
-                    "Failed parsing tre as type {} with error {}. "
-                    "Returning unparsed.".format(known_tre.__name__, e))
+                    "Returning unparsed tre, because we failed parsing tre as "
+                    "type {} with exception\n\t{}".format(known_tre.__name__, e))
         return UnknownTRE.from_bytes(value, start)
+
+    def to_json(self):
+        out = OrderedDict([('tag', self.TAG), ('length', self.EL)])
+        if isinstance(self.DATA, bytes):
+            out['data'] = self.DATA
+        else:
+            out['data'] = self.DATA.to_json()
+        return out
 
 
 class UnknownTRE(TRE):
@@ -904,7 +973,7 @@ class UnknownTRE(TRE):
             raise ValueError('TAG must be 6 or fewer characters')
 
         self._TAG = TAG
-        self.data = data
+        self._data = data
 
     @property
     def TAG(self):
@@ -951,7 +1020,8 @@ class TREList(NITFElement):
         super(TREList, self).__init__(tres=tres, **kwargs)
 
     @property
-    def tres(self):  # type: () -> List[TRE]
+    def tres(self):
+        # type: () -> List[TRE]
         return self._tres
 
     @tres.setter
@@ -993,8 +1063,16 @@ class TREList(NITFElement):
             tres = []
             loc = start
             while loc < len(value):
+                anticipated_length = int_func(value[loc+6:loc+11]) + 11
                 tre = TRE.from_bytes(value, loc)
-                loc += tre.get_bytes_length()
+                parsed_length = tre.get_bytes_length()
+                if parsed_length != anticipated_length:
+                    logging.error(
+                        'The given length for TRE {} instance is {}, but the constructed length is {}. '
+                        'This is the result of a malformed TRE object definition. '
+                        'If possible, this should be reported to the sarpy team for review/repair.'.format(
+                            tre.TAG, anticipated_length, parsed_length))
+                loc += anticipated_length
                 tres.append(tre)
             fields['tres'] = tres
             return len(value)
@@ -1003,8 +1081,20 @@ class TREList(NITFElement):
     def __len__(self):
         return len(self._tres)
 
-    def __getitem__(self, item):  # type: (Union[int, slice]) -> Union[TRE, List[TRE]]
-        return self._tres[item]
+    def __getitem__(self, item):
+        # type: (Union[int, slice, str]) -> Union[None, TRE, List[TRE]]
+        if isinstance(item, (int, slice)):
+            return self._tres[item]
+        elif isinstance(item, string_types):
+            for entry in self.tres:
+                if entry.TAG == item:
+                    return entry
+            return None
+        else:
+            raise TypeError('Got unhandled type {}'.format(type(item)))
+
+    def to_json(self):
+        return [entry.to_json() for entry in self._tres]
 
 
 class TREHeader(Unstructured):

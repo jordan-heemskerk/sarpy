@@ -141,7 +141,8 @@ def _parse_str(value, name, instance):
     if isinstance(value, string_types):
         return value
     elif isinstance(value, ElementTree.Element):
-        return _get_node_value(value)
+        node_value = _get_node_value(value)
+        return "" if node_value is None else node_value
     else:
         raise TypeError(
             'field {} of class {} requires a string value.'.format(name, instance.__class__.__name__))
@@ -162,7 +163,7 @@ def _parse_bool(value, name, instance):
         return None
     if isinstance(value, bool):
         return value
-    elif isinstance(value, integer_types):
+    elif isinstance(value, integer_types) or isinstance(value, numpy.bool_):
         return bool(value)
     elif isinstance(value, ElementTree.Element):
         # from XML deserialization
@@ -187,8 +188,9 @@ def _parse_int(value, name, instance):
             return int_func(value)
         except ValueError as e:
             logging.warning(
-                'Got non-integer value {} for integer valued field {} of '
-                'class {}'.format(value, name, instance.__class__.__name__))
+                'Got non-integer value {}\n'
+                'for integer valued field {} of class {}'.format(
+                    value, name, instance.__class__.__name__))
             try:
                 return int_func(float(value))
             except:
@@ -618,15 +620,17 @@ class _StringListDescriptor(_BasicDescriptor):
     def __set__(self, instance, value):
         def set_value(new_value):
             if len(new_value) < self.minimum_length:
-                msg = 'Attribute {} of class {} is a string list of size {}, and must have length at least ' \
-                      '{}.'.format(self.name, instance.__class__.__name__, value.size, self.minimum_length)
+                msg = 'Attribute {} of class {} is a string list of size {},\n' \
+                      'and must have length at least {}.'.format(
+                    self.name, instance.__class__.__name__, value.size, self.minimum_length)
                 if self.strict:
                     raise ValueError(msg)
                 else:
                     logging.error(msg)
             if len(new_value) > self.maximum_length:
-                msg = 'Attribute {} of class {} is a string list of size {}, and must have length no greater than ' \
-                      '{}.'.format(self.name, instance.__class__.__name__, value.size, self.maximum_length)
+                msg = 'Attribute {} of class {} is a string list of size {},\n' \
+                      'and must have length no greater than {}.'.format(
+                    self.name, instance.__class__.__name__, value.size, self.maximum_length)
                 if self.strict:
                     raise ValueError(msg)
                 else:
@@ -682,8 +686,9 @@ class _StringEnumDescriptor(_BasicDescriptor):
         if val in self.values:
             self.data[instance] = val
         else:
-            msg = 'Attribute {} of class {} received {}, but values ARE REQUIRED to be ' \
-                  'one of {}'.format(self.name, instance.__class__.__name__, value, self.values)
+            msg = 'Attribute {} of class {} received {},\n' \
+                  'but values ARE REQUIRED to be one of {}'.format(
+                self.name, instance.__class__.__name__, value, self.values)
             if self.strict:
                 raise ValueError(msg)
             else:
@@ -706,9 +711,9 @@ class _BooleanDescriptor(_BasicDescriptor):
             self.data[instance] = _parse_bool(value, self.name, instance)
         except Exception as e:
             logging.error(
-                'Failed converting {} of type {} to `bool` for field {} of '
-                'class {} with exception {} - {}. Setting value to None, '
-                'which may be against the standard'.format(
+                'Failed converting {} of type {} to `bool`\n'
+                'for field {} of class {} with exception {} - {}\n'
+                'Setting value to None, which may be against the standard'.format(
                     value, type(value), self.name, instance.__class__.__name__, type(e), e))
             self.data[instance] = None
 
@@ -743,9 +748,9 @@ class _IntegerDescriptor(_BasicDescriptor):
             iv = _parse_int(value, self.name, instance)
         except Exception as e:
             logging.error(
-                'Failed converting {} of type {} to `int` for field {} of '
-                'class {} with exception {} - {}. Setting value to None, '
-                'which may be against the standard'.format(
+                'Failed converting {} of type {} to `int`\n'
+                'for field {} of class {} with exception {} - {}.\n'
+                'Setting value to None, which may be against the standard'.format(
                     value, type(value), self.name, instance.__class__.__name__, type(e), e))
             self.data[instance] = None
             return
@@ -753,8 +758,9 @@ class _IntegerDescriptor(_BasicDescriptor):
         if self._in_bounds(iv):
             self.data[instance] = iv
         else:
-            msg = 'Attribute {} of class {} is required by standard to take value between {}. ' \
-                  'Invalid value {}'.format(self.name, instance.__class__.__name__, self.bounds, iv)
+            msg = 'Attribute {} of class {} is required by standard\n' \
+                  'to take value between {}. Invalid value {}'.format(
+                self.name, instance.__class__.__name__, self.bounds, iv)
             if self.strict:
                 raise ValueError(msg)
             else:
@@ -784,9 +790,9 @@ class _IntegerEnumDescriptor(_BasicDescriptor):
             iv = _parse_int(value, self.name, instance)
         except Exception as e:
             logging.error(
-                'Failed converting {} of type {} to `int` for field {} of '
-                'class {} with exception {} - {}. Setting value to None, '
-                'which may be against the standard'.format(
+                'Failed converting {} of type {} to `int`\n'
+                'for field {} of class {} with exception {} - {}.\n'
+                'Setting value to None, which may be against the standard'.format(
                     value, type(value), self.name, instance.__class__.__name__, type(e), e))
             self.data[instance] = None
             return
@@ -794,7 +800,8 @@ class _IntegerEnumDescriptor(_BasicDescriptor):
         if iv in self.values:
             self.data[instance] = iv
         else:
-            msg = 'Attribute {} of class {} must take value in {}. Invalid value {}.'.format(
+            msg = 'Attribute {} of class {} must take value in {}.\n' \
+                  'Invalid value {}.'.format(
                 self.name, instance.__class__.__name__, self.values, iv)
             if self.strict:
                 raise ValueError(msg)
@@ -823,15 +830,18 @@ class _IntegerListDescriptor(_BasicDescriptor):
     def __set__(self, instance, value):
         def set_value(new_value):
             if len(new_value) < self.minimum_length:
-                msg = 'Attribute {} of class {} is an integer list of size {}, and must have size at least ' \
-                      '{}.'.format(self.name, instance.__class__.__name__, value.size, self.minimum_length)
+                msg = 'Attribute {} of class {} is an integer list of size {},\n' \
+                      'and must have size at least {}.'.format(
+
+                      self.name, instance.__class__.__name__, value.size, self.minimum_length)
                 if self.strict:
                     raise ValueError(msg)
                 else:
                     logging.info(msg)
             if len(new_value) > self.maximum_length:
-                msg = 'Attribute {} of class {} is an integer list of size {}, and must have size no larger than ' \
-                      '{}.'.format(self.name, instance.__class__.__name__, value.size, self.maximum_length)
+                msg = 'Attribute {} of class {} is an integer list of size {},\n' \
+                      'and must have size no larger than {}.'.format(
+                    self.name, instance.__class__.__name__, value.size, self.maximum_length)
                 if self.strict:
                     raise ValueError(msg)
                 else:
@@ -887,9 +897,9 @@ class _FloatDescriptor(_BasicDescriptor):
             iv = _parse_float(value, self.name, instance)
         except Exception as e:
             logging.error(
-                'Failed converting {} of type {} to `float` for field {} of '
-                'class {} with exception {} - {}. Setting value to None, '
-                'which may be against the standard'.format(
+                'Failed converting {} of type {} to `float`\n'
+                'for field {} of class {} with exception {} - {}.\n'
+                'Setting value to None, which may be against the standard'.format(
                     value, type(value), self.name, instance.__class__.__name__, type(e), e))
             self.data[instance] = None
             return
@@ -897,7 +907,8 @@ class _FloatDescriptor(_BasicDescriptor):
         if self._in_bounds(iv):
             self.data[instance] = iv
         else:
-            msg = 'Attribute {} of class {} is required by standard to take value between {}.'.format(
+            msg = 'Attribute {} of class {}\n' \
+                  'is required by standard to take value between {}.'.format(
                 self.name, instance.__class__.__name__, self.bounds)
             if self.strict:
                 raise ValueError(msg)
@@ -926,15 +937,17 @@ class _FloatListDescriptor(_BasicDescriptor):
     def __set__(self, instance, value):
         def set_value(new_value):
             if len(new_value) < self.minimum_length:
-                msg = 'Attribute {} of class {} is an float list of size {}, and must have size at least ' \
-                      '{}.'.format(self.name, instance.__class__.__name__, value.size, self.minimum_length)
+                msg = 'Attribute {} of class {} is an float list of size {},\n' \
+                      'and must have size at least {}.'.format(
+                    self.name, instance.__class__.__name__, value.size, self.minimum_length)
                 if self.strict:
                     raise ValueError(msg)
                 else:
                     logging.info(msg)
             if len(new_value) > self.maximum_length:
-                msg = 'Attribute {} of class {} is a float list of size {}, and must have size no larger than ' \
-                      '{}.'.format(self.name, instance.__class__.__name__, value.size, self.maximum_length)
+                msg = 'Attribute {} of class {} is a float list of size {},\n' \
+                      'and must have size no larger than {}.'.format(
+                    self.name, instance.__class__.__name__, value.size, self.maximum_length)
                 if self.strict:
                     raise ValueError(msg)
                 else:
@@ -975,9 +988,9 @@ class _ComplexDescriptor(_BasicDescriptor):
             self.data[instance] = _parse_complex(value, self.name, instance)
         except Exception as e:
             logging.error(
-                'Failed converting {} of type {} to `complex` for field {} of '
-                'class {} with exception {} - {}. Setting value to None, '
-                'which may be against the standard'.format(
+                'Failed converting {} of type {} to `complex`\n'
+                'for field {} of class {} with exception {} - {}.\n'
+                'Setting value to None, which may be against the standard'.format(
                     value, type(value), self.name, instance.__class__.__name__, type(e), e))
             self.data[instance] = None
 
@@ -1003,15 +1016,17 @@ class _FloatArrayDescriptor(_BasicDescriptor):
     def __set__(self, instance, value):
         def set_value(new_val):
             if len(new_val) < self.minimum_length:
-                msg = 'Attribute {} of class {} is a double array of size {}, and must have size at least ' \
-                      '{}.'.format(self.name, instance.__class__.__name__, value.size, self.minimum_length)
+                msg = 'Attribute {} of class {} is a double array of size {},\n' \
+                      'and must have size at least {}.'.format(
+                    self.name, instance.__class__.__name__, value.size, self.minimum_length)
                 if self.strict:
                     raise ValueError(msg)
                 else:
                     logging.error(msg)
             if len(new_val) > self.maximum_length:
-                msg = 'Attribute {} of class {} is a double array of size {}, and must have size no larger than ' \
-                      '{}.'.format(self.name, instance.__class__.__name__, value.size, self.maximum_length)
+                msg = 'Attribute {} of class {} is a double array of size {},\n' \
+                      'and must have size no larger than {}.'.format(
+                    self.name, instance.__class__.__name__, value.size, self.maximum_length)
                 if self.strict:
                     raise ValueError(msg)
                 else:
@@ -1087,9 +1102,9 @@ class _FloatModularDescriptor(_BasicDescriptor):
             val = _parse_float(value, self.name, instance)
         except Exception as e:
             logging.error(
-                'Failed converting {} of type {} to `float` for field {} of '
-                'class {} with exception {} - {}. Setting value to None, '
-                'which may be against the standard'.format(
+                'Failed converting {} of type {} to `float`\n'
+                'for field {} of class {} with exception {} - {}.\n'
+                'Setting value to None, which may be against the standard'.format(
                     value, type(value), self.name, instance.__class__.__name__, type(e), e))
             self.data[instance] = None
             return
@@ -1115,9 +1130,9 @@ class _SerializableDescriptor(_BasicDescriptor):
             self.data[instance] = _parse_serializable(value, self.name, instance, self.the_type)
         except Exception as e:
             logging.error(
-                'Failed converting {} of type {} to Serializable type {} for field {} of '
-                'class {} with exception {} - {}. Setting value to None, '
-                'which may be against the standard.'.format(
+                'Failed converting {} of type {} to Serializable type {}\n'
+                'for field {} of class {} with exception {} - {}.\n'
+                'Setting value to None, which may be against the standard.'.format(
                     value, type(value), self.the_type, self.name, instance.__class__.__name__, type(e), e))
             self.data[instance] = None
 
@@ -1142,9 +1157,9 @@ class _UnitVectorDescriptor(_BasicDescriptor):
             vec = _parse_serializable(value, self.name, instance, self.the_type)
         except Exception as e:
             logging.error(
-                'Failed converting {} of type {} to Unit Vector Type type {} for field {} of '
-                'class {} with exception {} - {}. Setting value to None, '
-                'which may be against the standard'.format(
+                'Failed converting {} of type {} to Unit Vector Type type {}\n'
+                'for field {} of class {} with exception {} - {}.\n'
+                'Setting value to None, which may be against the standard'.format(
                     value, type(value), self.the_type, self.name, instance.__class__.__name__, type(e), e))
             self.data[instance] = None
             return None
@@ -1154,9 +1169,10 @@ class _UnitVectorDescriptor(_BasicDescriptor):
         the_norm = norm(coords)
         if the_norm == 0:
             logging.error(
-                'The input for field {} is expected to be made into a unit vector. '
-                'In this case, the norm of the input is 0. The value is set to None, '
-                'which may be against the standard.'.format(self.name))
+                'The input for field {} is expected to be made into a unit vector.\n'
+                'In this case, the norm of the input is 0.\n'
+                'The value is set to None, which may be against the standard.'.format(
+                    self.name))
             self.data[instance] = None
         elif the_norm == 1:
             self.data[instance] = vec
@@ -1262,9 +1278,9 @@ class _SerializableListDescriptor(_BasicDescriptor):
             self.data[instance] = _parse_serializable_list(value, self.name, instance, self.child_type)
         except Exception as e:
             logging.error(
-                'Failed converting {} of type {} to serializable list of type {} for field {} of '
-                'class {} with exception {} - {}. Setting value to None, '
-                'which may be against the standard'.format(
+                'Failed converting {} of type {} to serializable list of type {}\n'
+                'for field {} of class {} with exception {} - {}.\n'
+                'Setting value to None, which may be against the standard'.format(
                     value, type(value), self.child_type, self.name, instance.__class__.__name__, type(e), e))
             self.data[instance] = None
 
@@ -1371,7 +1387,7 @@ class Serializable(object):
             # not expected attribute - descriptors, properties, etc
             logging.warning(
                 'Class {} instance receiving unexpected attribute {}.\n'
-                '\tEnsure that this is not a typo of an expected field name.'.format(self.__class__.__name__, key))
+                'Ensure that this is not a typo of an expected field name.'.format(self.__class__.__name__, key))
         object.__setattr__(self, key, value)
 
     def set_numeric_format(self, attribute, format_string):
@@ -1416,7 +1432,43 @@ class Serializable(object):
         else:
             return str
 
-    def is_valid(self, recursive=False):
+    def log_validity_error(self, msg):
+        """
+        Log a validity check error message.
+        
+        Parameters
+        ----------
+        msg : str
+        """
+
+        logger = logging.getLogger('validation')
+        logger.error('{}: {}'.format(self.__class__.__name__, msg))
+
+    def log_validity_warning(self, msg):
+        """
+        Log a validity check warning message.
+
+        Parameters
+        ----------
+        msg : str
+        """
+
+        logger = logging.getLogger('validation')
+        logger.warning('{}: {}'.format(self.__class__.__name__, msg))
+
+    def log_validity_info(self, msg):
+        """
+        Log a validation info message.
+
+        Parameters
+        ----------
+        msg : str
+        """
+
+        logger = logging.getLogger('validation')
+        logger.info('{}: {}'.format(self.__class__.__name__, msg))
+
+    def is_valid(self, recursive=False, stack=False):
         """Returns the validity of this object according to the schema. This is done by inspecting that all required
         fields (i.e. entries of `_required`) are not `None`.
 
@@ -1424,6 +1476,8 @@ class Serializable(object):
         ----------
         recursive : bool
             True if we recursively check that child are also valid. This may result in verbose (i.e. noisy) logging.
+        stack : bool
+            Print a recursive error message?
 
         Returns
         -------
@@ -1435,7 +1489,7 @@ class Serializable(object):
         if not recursive:
             return all_required
 
-        valid_children = self._recursive_validity_check()
+        valid_children = self._recursive_validity_check(stack=stack)
         return all_required & valid_children
 
     def _basic_validity_check(self):
@@ -1452,8 +1506,7 @@ class Serializable(object):
         for attribute in self._required:
             present = (getattr(self, attribute) is not None)
             if not present:
-                logging.error(
-                    "Class {} is missing required attribute {}".format(self.__class__.__name__, attribute))
+                self.log_validity_error("Missing required attribute {}".format(attribute))
             all_required &= present
 
         choices = True
@@ -1466,21 +1519,24 @@ class Serializable(object):
                 if getattr(self, attribute) is not None:
                     present.append(attribute)
             if len(present) == 0 and required:
-                logging.error(
-                    "Class {} requires that exactly one of the attributes {} is set, but none are "
-                    "set.".format(self.__class__.__name__, collect))
+                self.log_validity_error(
+                    "Exactly one of the attributes {} should be set, but none are set".format(collect))
                 choices = False
             elif len(present) > 1:
-                logging.error(
-                    "Class {} requires that no more than one of attributes {} is set, but multiple {} are "
-                    "set.".format(self.__class__.__name__, collect, present))
+                self.log_validity_error(
+                    "Exactly one of the attributes {} should be set, but multiple ({}) are set".format(collect, present))
                 choices = False
 
         return all_required and choices
 
-    def _recursive_validity_check(self):
+    def _recursive_validity_check(self, stack=False):
         """
         Perform a recursive validity check on all present attributes.
+
+        Parameters
+        ----------
+        stack : bool
+            Print a recursive error message?
 
         Returns
         -------
@@ -1490,7 +1546,7 @@ class Serializable(object):
 
         def check_item(value):
             if isinstance(value, (Serializable, SerializableArray)):
-                return value.is_valid(recursive=True)
+                return value.is_valid(recursive=True, stack=stack)
             return True
 
         valid_children = True
@@ -1502,11 +1558,10 @@ class Serializable(object):
             elif isinstance(val, list):
                 for entry in val:
                     good &= check_item(entry)
-            # any issues will be logged as discovered, but we should help with the "stack"
-            if not good:
-                logging.error(  # I should probably do better with a stack type situation. This is traceable, at least.
-                    "Issue discovered with {} attribute of type {} of class {}.".format(
-                        attribute, type(val), self.__class__.__name__))
+            # any issues will be logged as discovered, but should we help with the "stack"?
+            if not good and stack:
+                self.log_validity_error(
+                    "Issue discovered with attribute {} of type {}.".format(attribute, type(val)))
             valid_children &= good
         return valid_children
 
@@ -1533,7 +1588,8 @@ class Serializable(object):
         """
 
         if len(node) == 0 and len(node.attrib) == 0:
-            logging.warning('There are no children or attributes associated with node {} for class {}. Returning None.'.format(node, cls))
+            logging.warning('There are no children or attributes associated\n'
+                            'with node {} for class {}. Returning None.'.format(node, cls))
             return None
 
         def handle_attribute(the_tag, the_xml_ns_key):
@@ -1725,13 +1781,14 @@ class Serializable(object):
                 _create_text_node(doc, prim_tag, val.isoformat(sep='T'), parent=node)
             else:
                 raise ValueError(
-                    'An entry for class {} using tag {} is of type {}, and serialization has not '
-                    'been implemented'.format(self.__class__.__name__, field, type(val)))
+                    'An entry for class {} using tag {} is of type {},\n'
+                    'and serialization has not been implemented'.format(self.__class__.__name__, field, type(val)))
 
         if check_validity:
-            if not self.is_valid():
-                msg = "{} is not valid, and cannot be SAFELY serialized to XML according to " \
-                      "the SICD standard.".format(self.__class__.__name__)
+            if not self.is_valid(stack=False):
+                msg = "{} is not valid,\n" \
+                      "and cannot be SAFELY serialized to XML according to the " \
+                      "SICD standard.".format(self.__class__.__name__)
                 if strict:
                     raise ValueError(msg)
                 logging.warning(msg)
@@ -1876,8 +1933,9 @@ class Serializable(object):
                     'been implemented'.format(self.__class__.__name__, field, type(val)))
 
         if check_validity:
-            if not self.is_valid():
-                msg = "{} is not valid, and cannot be SAFELY serialized to a dictionary valid in " \
+            if not self.is_valid(stack=False):
+                msg = "{} is not valid,\n" \
+                      "and cannot be SAFELY serialized to a dictionary valid in " \
                       "the SICD standard.".format(self.__class__.__name__)
                 if strict:
                     raise ValueError(msg)
@@ -2092,7 +2150,40 @@ class SerializableArray(object):
             raise TypeError('Elements of {} must be of type {}, not None'.format(self._name, self._child_type))
         self._array[index] = _parse_serializable(value, self._name, self, self._child_type)
 
-    def is_valid(self, recursive=False):
+    def log_validity_error(self, msg):
+        """
+        Log a validation error message.
+
+        Parameters
+        ----------
+        msg : str
+        """
+
+        logging.error('{}:{} {}'.format(self.__class__.__name__, self._name, msg))
+
+    def log_validity_warning(self, msg):
+        """
+        Log a validation warning message.
+
+        Parameters
+        ----------
+        msg : str
+        """
+
+        logging.warning('{}:{} {}'.format(self.__class__.__name__, self._name, msg))
+
+    def log_validity_info(self, msg):
+        """
+        Log a validation info message.
+
+        Parameters
+        ----------
+        msg : str
+        """
+
+        logging.info('{}:{} {}'.format(self.__class__.__name__, self._name, msg))
+
+    def is_valid(self, recursive=False, stack=False):
         """Returns the validity of this object according to the schema. This is done by inspecting that the
         array is populated.
 
@@ -2100,24 +2191,23 @@ class SerializableArray(object):
         ----------
         recursive : bool
             True if we recursively check that children are also valid. This may result in verbose (i.e. noisy) logging.
-
+        stack : bool
+            Should we print error messages recursively, for a stack type situation?
         Returns
         -------
         bool
             condition for validity of this element
         """
         if self._array is None:
-            logging.error(
-                "Field {} has unpopulated array".format(self._name))
+            self.log_validity_error("Unpopulated array")
             return False
         if not recursive:
             return True
         valid_children = True
         for i, entry in enumerate(self._array):
-            good = entry.is_valid(recursive=True)
-            if not good:
-                logging.error(  # I should probably do better with a stack type situation. This is traceable, at least.
-                    "Issue discovered with entry {} array field {}.".format(i, self._name))
+            good = entry.is_valid(recursive=True, stack=stack)
+            if not good and stack:
+                self.log_validity_error("Issue discovered with entry {}".format(i))
             valid_children &= good
         return valid_children
 

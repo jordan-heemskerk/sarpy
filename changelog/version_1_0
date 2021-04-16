@@ -1,5 +1,23 @@
 # This details the important differences introduced in sarpy 1.0
 
+* .53 - SICD normalization method bug fixes
+* .52 - Fine-tuning parameter defaults and naming in projection methods
+* .51 - Fixed subtle bug in projection to constant HAE method
+* .50 - Introduced projection methods for SIDD structures
+* .49 - Bug fix for SICD normalization methods
+* .48 - Making SICD normalization methods more robust
+* .47 - Tidy up ICEYE parameter values
+* .46 - Tidy up chipper argument values
+* .45 - Introduced ICEYE reading capability
+* .44 - Handling some edge cases for ortho-rectification issues
+* .43 - Fixed bug in SICD.RadarCollection.Area and SICD.MatchInfo parsing
+* .42 - Introduced coherent KMZ and SIDD product creation
+* .41 - Resolved CPHD Version 1.0 bug for PVP parsing
+* .40 - Adjust ImageBeamComp for derived formats
+* .39 - Account for non-convexity of projection for ortho-rectification
+* .38 - Clarified some projection parameters and documentation
+* .37 - Optimized some ortho-rectification parameters
+* .36 - Refactored CSI and subaperture processing and introduced practical SIDD creation
 * .35 - Added support for Capella format data
 * .34 - Fixed NITF bug for image size
 * .33 - Some general NITF compatibility updates

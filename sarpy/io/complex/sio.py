@@ -11,14 +11,12 @@ from typing import Union, Dict, Tuple
 
 import numpy
 
-from .sicd_elements.blocks import RowColType
-from .sicd_elements.SICD import SICDType
-from .sicd_elements.ImageData import ImageDataType, FullImageType
-from ..general.base import BaseReader
-from ..general.bip import BIPChipper, BIPWriter
-# noinspection PyProtectedMember
-from .sicd import complex_to_amp_phase, complex_to_int, amp_phase_to_complex
-from ..general.utils import parse_xml_from_string
+from sarpy.io.complex.sicd_elements.blocks import RowColType
+from sarpy.io.complex.sicd_elements.SICD import SICDType
+from sarpy.io.complex.sicd_elements.ImageData import ImageDataType, FullImageType
+from sarpy.io.general.base import BaseReader, BIPChipper, BIPWriter
+from sarpy.io.complex.sicd import complex_to_amp_phase, complex_to_int, amp_phase_to_complex
+from sarpy.io.general.utils import parse_xml_from_string
 
 __classification__ = "UNCLASSIFIED"
 __author__ = ("Thomas McCullough", "Wade Schwartzkopf")
@@ -45,7 +43,7 @@ def is_a(file_name):
 
     try:
         sio_details = SIODetails(file_name)
-        print('File {} is determined to be a SIO file.'.format(file_name))
+        logging.info('File {} is determined to be a SIO file.'.format(file_name))
         return SIOReader(sio_details)
     except IOError:
         return None
@@ -308,13 +306,17 @@ class SIOReader(BaseReader):
         self._sio_details = sio_details
         sicd_meta = sio_details.get_sicd()
         if sicd_meta.ImageData.PixelType == 'AMP8I_PHS8I':
-            complex_type = amp_phase_to_complex(sicd_meta.ImageData.AmpTable)
+            transform_data = amp_phase_to_complex(sicd_meta.ImageData.AmpTable)
         else:
-            complex_type = True
+            transform_data = 'COMPLEX'
+        raw_bands = 2
+        output_bands = 1
+        output_dtype = 'complex64'
         chipper = BIPChipper(sio_details.file_name, sio_details.data_type, sio_details.data_size,
-                             symmetry=sio_details.symmetry, complex_type=complex_type,
+                             raw_bands, output_bands, output_dtype,
+                             symmetry=sio_details.symmetry, transform_data=transform_data,
                              data_offset=sio_details.data_offset)
-        super(SIOReader, self).__init__(sicd_meta, chipper, is_sicd_type=True)
+        super(SIOReader, self).__init__(sicd_meta, chipper, reader_type="SICD")
 
     @property
     def sio_details(self):
@@ -334,7 +336,7 @@ class SIOReader(BaseReader):
 #  The actual writing implementation
 
 class SIOWriter(BIPWriter):
-    def __init__(self, file_name, sicd_meta, user_data=None):
+    def __init__(self, file_name, sicd_meta, user_data=None, check_older_version=False, check_existence=True):
         """
 
         Parameters
@@ -342,7 +344,15 @@ class SIOWriter(BIPWriter):
         file_name : str
         sicd_meta : SICDType
         user_data : None|Dict[str, str]
+        check_older_version : bool
+            Try to use an older version (1.1) of the SICD standard, for possible
+            application compliance issues?
+        check_existence : bool
+            Should we check if the given file already exists, and raises an exception if so?
         """
+
+        if check_existence and os.path.exists(file_name):
+            raise IOError('Given file {} already exists, and a new SIO file cannot be created here.'.format(file_name))
 
         # choose magic number (with user data) and corresponding endian-ness
         magic_number = 0xFD7F02FF
@@ -355,17 +365,17 @@ class SIOWriter(BIPWriter):
             data_type = numpy.dtype('{}f4'.format(endian))
             element_type = 13
             element_size = 8
-            complex_type = True
+            transform_data = 'COMPLEX'
         elif pixel_type == 'RE16I_IM16I':
             data_type = numpy.dtype('{}i2'.format(endian))
             element_type = 12
             element_size = 4
-            complex_type = complex_to_int
+            transform_data = complex_to_int
         else:
             data_type = numpy.dtype('{}u1'.format(endian))
             element_type = 11
             element_size = 2
-            complex_type = complex_to_amp_phase(sicd_meta.ImageData.AmpTable)
+            transform_data = complex_to_amp_phase(sicd_meta.ImageData.AmpTable)
         # construct the sio header
         header = numpy.array(
             [magic_number, image_size[0], image_size[1], element_type, element_size],
@@ -373,7 +383,8 @@ class SIOWriter(BIPWriter):
         # construct the user data - must be {str : str}
         if user_data is None:
             user_data = {}
-        user_data['SICDMETA'] = sicd_meta.to_xml_string(tag='SICD')
+        uh_args = sicd_meta.get_des_details(check_older_version)
+        user_data['SICDMETA'] = sicd_meta.to_xml_string(tag='SICD', urn=uh_args['DESSHTN'])
         data_offset = 20
         with open(file_name, 'wb') as fi:
             fi.write(struct.pack('{}5I'.format(endian), *header))
@@ -387,5 +398,6 @@ class SIOWriter(BIPWriter):
                 fi.write(struct.pack('{}{}s'.format(endian, len(val_bytes), val_bytes)))
                 data_offset += 4 + len(name_bytes) + 4 + len(val_bytes)
         # initialize the bip writer - we're ready to go
-        super(SIOWriter, self).__init__(file_name, image_size, data_type,
-                                        complex_type=complex_type, data_offset=data_offset)
+        output_bands = 2
+        super(SIOWriter, self).__init__(file_name, image_size, data_type, output_bands,
+                                        transform_data=transform_data, data_offset=data_offset)

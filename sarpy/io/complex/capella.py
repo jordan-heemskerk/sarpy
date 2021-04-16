@@ -12,22 +12,22 @@ from collections import OrderedDict
 from scipy.constants import speed_of_light
 import numpy
 
-from ..general.base import BaseReader
-from ..general.tiff import TiffDetails, NativeTiffChipper
-from ..general.utils import parse_timestring, get_seconds, string_types
-from .utils import fit_position_xvalidation
-from .sicd_elements.blocks import XYZPolyType
-from .sicd_elements.SICD import SICDType
-from .sicd_elements.CollectionInfo import CollectionInfoType, RadarModeType
-from .sicd_elements.ImageCreation import ImageCreationType
-from .sicd_elements.ImageData import ImageDataType
-from .sicd_elements.GeoData import GeoDataType, SCPType
-from .sicd_elements.Position import PositionType
-from .sicd_elements.Grid import GridType, DirParamType, WgtTypeType
-from .sicd_elements.RadarCollection import RadarCollectionType, \
+from sarpy.io.general.base import BaseReader
+from sarpy.io.general.tiff import TiffDetails, NativeTiffChipper
+from sarpy.io.general.utils import parse_timestring, get_seconds, string_types
+from sarpy.io.complex.utils import fit_position_xvalidation
+from sarpy.io.complex.sicd_elements.blocks import XYZPolyType
+from sarpy.io.complex.sicd_elements.SICD import SICDType
+from sarpy.io.complex.sicd_elements.CollectionInfo import CollectionInfoType, RadarModeType
+from sarpy.io.complex.sicd_elements.ImageCreation import ImageCreationType
+from sarpy.io.complex.sicd_elements.ImageData import ImageDataType
+from sarpy.io.complex.sicd_elements.GeoData import GeoDataType, SCPType
+from sarpy.io.complex.sicd_elements.Position import PositionType
+from sarpy.io.complex.sicd_elements.Grid import GridType, DirParamType, WgtTypeType
+from sarpy.io.complex.sicd_elements.RadarCollection import RadarCollectionType, \
     WaveformParametersType, TxFrequencyType, ChanParametersType
-from .sicd_elements.Timeline import TimelineType, IPPSetType
-from .sicd_elements.ImageFormation import ImageFormationType, RcvChanProcType, \
+from sarpy.io.complex.sicd_elements.Timeline import TimelineType, IPPSetType
+from sarpy.io.complex.sicd_elements.ImageFormation import ImageFormationType, RcvChanProcType, \
     TxFrequencyProcType, ProcessingType
 
 
@@ -58,7 +58,7 @@ def is_a(file_name):
 
     try:
         csk_details = CapellaDetails(file_name)
-        print('File {} is determined to be a Capella file.'.format(file_name))
+        logging.info('File {} is determined to be a Capella file.'.format(file_name))
         return CapellaReader(csk_details)
     except IOError:
         return None
@@ -317,6 +317,7 @@ class CapellaDetails(object):
         def get_image_formation():
             # type: () -> ImageFormationType
 
+            radar = collect['radar']
             algo = collect['image']['algorithm'].upper()
             processings = None
             if algo == 'BACKPROJECTION':
@@ -332,6 +333,7 @@ class CapellaDetails(object):
                 ImageFormAlgo=algo,
                 TStartProc=0,
                 TEndProc=duration,
+                TxRcvPolarizationProc='{}:{}'.format(radar['transmit_polarization'], radar['receive_polarization']),
                 TxFrequencyProc=TxFrequencyProcType(
                     MinProc=radar_collection.TxFrequency.Min,
                     MaxProc=radar_collection.TxFrequency.Max),
@@ -404,7 +406,7 @@ class CapellaReader(BaseReader):
         self._capella_details = capella_details
         sicd = self.capella_details.get_sicd()
         chipper = NativeTiffChipper(self.capella_details.tiff_details, symmetry=self.capella_details.get_symmetry())
-        super(CapellaReader, self).__init__(sicd, chipper, is_sicd_type=True)
+        super(CapellaReader, self).__init__(sicd, chipper, reader_type="SICD")
 
     @property
     def capella_details(self):

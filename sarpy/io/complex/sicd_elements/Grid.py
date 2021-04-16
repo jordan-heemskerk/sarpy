@@ -30,12 +30,39 @@ int: the default size when generating WgtFunct from a named WgtType.
 
 
 def _hamming_ipr(x, a):
-    """Helper method"""
+    """
+    Evaluate the Hamming impulse response function over the given array.
+
+    Parameters
+    ----------
+    x : numpy.ndarray|float|int
+    a : float
+        The Hamming parameter value.
+
+    Returns
+    -------
+    numpy.ndarray
+    """
+
     return a*numpy.sinc(x) + 0.5*(1-a)*(numpy.sinc(x-1) + numpy.sinc(x+1)) - a/numpy.sqrt(2)
 
 
 def _raised_cos(n, coef):
-    """Helper method"""
+    """
+    Generates the raised cosine (i.e. Hamming) window as an array of the given size.
+
+    Parameters
+    ----------
+    n : int
+        The size of the generated window.
+    coef : float
+        The Hamming parameter value.
+
+    Returns
+    -------
+    numpy.ndarray
+    """
+
     weights = numpy.zeros((n,), dtype=numpy.float64)
     if (n % 2) == 0:
         k = int(n/2)
@@ -99,6 +126,34 @@ def _taylor_win(n, sidelobes=4, max_sidelobe_level=-30, normalize=True):
     if normalize:
         out /= numpy.amax(out)
     return out
+
+
+def _find_half_power(wgt_funct, oversample=1024):
+    """
+    Find the half power point of the impulse response function.
+
+    Parameters
+    ----------
+    wgt_funct : None|numpy.ndarray
+    oversample : int
+
+    Returns
+    -------
+    None|float
+    """
+
+    if wgt_funct is None:
+        return None
+
+    # solve for the half-power point in an oversampled impulse response
+    impulse_response = numpy.abs(numpy.fft.fft(wgt_funct, wgt_funct.size*oversample))/numpy.sum(wgt_funct)
+    ind = numpy.flatnonzero(impulse_response < 1 / numpy.sqrt(2))[0]
+    # find first index with less than half power,
+    # then linearly interpolate to estimate 1/sqrt(2) crossing
+    v0 = impulse_response[ind - 1]
+    v1 = impulse_response[ind]
+    zero_ind = ind - 1 + (1./numpy.sqrt(2) - v0)/(v1 - v0)
+    return 2*zero_ind/oversample
 
 
 class WgtTypeType(Serializable):
@@ -265,7 +320,7 @@ class DirParamType(Serializable):
         DeltaK2 : float
         DeltaKCOAPoly : Poly2DType|numpy.ndarray|list|tuple
         WgtType : WgtTypeType
-        WgtFunct : numpy.ndarray|list|tuple
+        WgtFunct : None|numpy.ndarray|list|tuple
         kwargs : dict
         """
 
@@ -283,7 +338,7 @@ class DirParamType(Serializable):
         self.WgtFunct = WgtFunct
         super(DirParamType, self).__init__(**kwargs)
 
-    def define_weight_function(self, weight_size=DEFAULT_WEIGHT_SIZE):
+    def define_weight_function(self, weight_size=DEFAULT_WEIGHT_SIZE, populate=True):
         """
         Try to derive WgtFunct from WgtType, if necessary. This should likely be called from the `GridType` parent.
 
@@ -291,15 +346,18 @@ class DirParamType(Serializable):
         ----------
         weight_size : int
             the size of the `WgtFunct` to generate.
+        populate : bool
+            Populate the WgtFunct value, if unpopulated?
 
         Returns
         -------
-        None
+        None|numpy.ndarray
         """
 
         if self.WgtType is None or self.WgtType.WindowName is None:
             return  # nothing to be done
 
+        value = None
         window_name = self.WgtType.WindowName.upper()
         if window_name == 'HAMMING':
             # A Hamming window is defined in many places as a raised cosine of weight .54, so this is the default.
@@ -309,16 +367,16 @@ class DirParamType(Serializable):
                 coef = float(self.WgtType.get_parameter_value(None, 0.54))  # just get first parameter - name?
             except ValueError:
                 coef = 0.54
-            self.WgtFunct = _raised_cos(weight_size, coef)
+            value = _raised_cos(weight_size, coef)
         elif window_name == 'HANNING':
-            self.WgtFunct = _raised_cos(weight_size, 0.5)
+            value = _raised_cos(weight_size, 0.5)
         elif window_name == 'KAISER':
             try:
                 # noinspection PyTypeChecker
                 beta = float(self.WgtType.get_parameter_value(None, 14))  # just get first parameter - name?
             except ValueError:
                 beta = 14.0  # default suggested in numpy.kaiser
-            self.WgtFunct = numpy.kaiser(weight_size, beta)
+            value = numpy.kaiser(weight_size, beta)
         elif window_name == 'TAYLOR':
             # noinspection PyTypeChecker
             sidelobes = int(self.WgtType.get_parameter_value('NBAR', 4))  # apparently the matlab argument name
@@ -326,10 +384,15 @@ class DirParamType(Serializable):
             max_sidelobe_level = float(self.WgtType.get_parameter_value('SLL', -30))  # same
             if max_sidelobe_level > 0:
                 max_sidelobe_level *= -1
-            self.WgtFunct = _taylor_win(weight_size,
-                                        sidelobes=sidelobes,
-                                        max_sidelobe_level=max_sidelobe_level,
-                                        normalize=True)
+            value = _taylor_win(
+                weight_size,
+                sidelobes=sidelobes,
+                max_sidelobe_level=max_sidelobe_level,
+                normalize=True)
+
+        if populate and self.WgtFunct is None:
+            self.WgtFunct = value
+        return value
 
     def _get_broadening_factor(self):
         """
@@ -356,65 +419,70 @@ class DirParamType(Serializable):
                 coef = 0.5
 
             if coef is not None:
-                zero = newton(_hamming_ipr, 0.1, args=(coef,), tol=1e-12, maxiter=10000)
+                test_array = numpy.linspace(0.3, 2.5, 100)
+                values = _hamming_ipr(test_array, coef)
+                init_value = test_array[numpy.argmin(numpy.abs(values))]
+                zero = newton(_hamming_ipr, init_value, args=(coef,), tol=1e-12, maxiter=100)
                 return 2*zero
 
-        if self.WgtFunct is None:
-            return None  # nothing to be done
+        return _find_half_power(self.WgtFunct, oversample=1024)
 
-        # solve for the half-power point in an oversampled impulse response
-        OVERSAMPLE = 1024
-        impulse_response = numpy.abs(
-            numpy.fft.fft(self.WgtFunct, self.WgtFunct.size*OVERSAMPLE))/numpy.sum(self.WgtFunct)
-        ind = numpy.flatnonzero(impulse_response < 1/numpy.sqrt(2))[0]  # find first index with less than half power.
-        # linearly interpolate between impulse_response[ind-1] and impulse_response[ind] to find 1/sqrt(2)
-        v0 = impulse_response[ind-1]
-        v1 = impulse_response[ind]
-        zero_ind = ind - 1 + (1./numpy.sqrt(2) - v0)/(v1 - v0)
-        return 2*zero_ind/OVERSAMPLE
-
-    def define_response_widths(self):
+    def define_response_widths(self, populate=True):
         """
         Assuming that `WgtFunct` has been properly populated, define the response widths.
         This should likely be called by `GridType` parent.
 
+        Parameters
+        ----------
+        populate : bool
+            Should we populate ImpRespWid and ImpRespBW, if unpopulated?
+
         Returns
         -------
-        None
+        None|(float, float)
+            None or (ImpRespBw, ImpRespWid)
         """
 
-        if self.ImpRespBW is not None and self.ImpRespWid is None:
-            broadening_factor = self._get_broadening_factor()
-            if broadening_factor is not None:
-                self.ImpRespWid = broadening_factor/self.ImpRespBW
-        elif self.ImpRespBW is None and self.ImpRespWid is not None:
-            broadening_factor = self._get_broadening_factor()
-            if broadening_factor is not None:
-                self.ImpRespBW = broadening_factor/self.ImpRespWid
+        broadening_factor = self._get_broadening_factor()
+        if broadening_factor is None:
+            return None
 
-    def estimate_deltak(self, valid_vertices):
+        if self.ImpRespBW is not None:
+            resp_width = broadening_factor/self.ImpRespBW
+            if populate and self.ImpRespWid is None:
+                self.ImpRespWid = resp_width
+            return self.ImpRespBW, resp_width
+        elif self.ImpRespWid is not None:
+            resp_bw = broadening_factor/self.ImpRespWid
+            if populate and self.ImpRespBW is None:
+                self.ImpRespBW = resp_bw
+            return resp_bw, self.ImpRespWid
+        return None
+
+    def estimate_deltak(self, x_coords, y_coords, populate=False):
         """
         The `DeltaK1` and `DeltaK2` parameters can be estimated from `DeltaKCOAPoly`, if necessary. This should likely
         be called by the `GridType` parent.
 
         Parameters
         ----------
-        valid_vertices : None|numpy.ndarray
-            The array of corner points.
+        x_coords : None|numpy.ndarray
+            The physical vertex coordinates to evaluate DeltaKCOAPoly
+        y_coords : None|numpy.ndarray
+            The physical vertex coordinates to evaluate DeltaKCOAPoly
+        populate : bool
+            Populate the estimated values into DeltaK1 and DeltaK2, if unpopulated?
 
         Returns
         -------
-        None
+        (float, float)
         """
-
-        if self.DeltaK1 is not None and self.DeltaK2 is not None:
-            return  # nothing needs to be done
 
         if self.ImpRespBW is None or self.SS is None:
             return  # nothing can be done
 
-        if self.DeltaKCOAPoly is not None and valid_vertices is not None:
-            deltaKs = self.DeltaKCOAPoly(valid_vertices[:, 0], valid_vertices[:, 1])
+        if self.DeltaKCOAPoly is not None and x_coords is not None:
+            deltaKs = self.DeltaKCOAPoly(x_coords, y_coords)
             min_deltak = numpy.amin(deltaKs) - 0.5*self.ImpRespBW
             max_deltak = numpy.amax(deltaKs) + 0.5*self.ImpRespBW
         else:
@@ -424,14 +492,32 @@ class DirParamType(Serializable):
         if (min_deltak < -0.5/abs(self.SS)) or (max_deltak > 0.5/abs(self.SS)):
             min_deltak = -0.5/abs(self.SS)
             max_deltak = -min_deltak
-        self.DeltaK1 = min_deltak
-        self.DeltaK2 = max_deltak
 
-    def _check_deltak(self):
+        if populate or (self.DeltaK1 is None or self.DeltaK2 is None):
+            self.DeltaK1 = min_deltak
+            self.DeltaK2 = max_deltak
+        return min_deltak, max_deltak
+
+    def check_deltak(self, x_coords, y_coords):
+        """
+        Checks the DeltaK values for validity.
+
+        Parameters
+        ----------
+        x_coords : None|numpy.ndarray
+            The physical vertex coordinates to evaluate DeltaKCOAPoly
+        y_coords : None|numpy.ndarray
+            The physical vertex coordinates to evaluate DeltaKCOAPoly
+
+        Returns
+        -------
+        bool
+        """
+
         out = True
         try:
             if self.DeltaK2 <= self.DeltaK1 + 1e-10:
-                logging.error(
+                self.log_validity_error(
                     'DeltaK2 ({}) must be greater than DeltaK1 ({})'.format(self.DeltaK2, self.DeltaK1))
                 out = False
         except (AttributeError, TypeError, ValueError):
@@ -439,7 +525,7 @@ class DirParamType(Serializable):
 
         try:
             if self.DeltaK2 > 1./(2*self.SS) + 1e-10:
-                logging.error(
+                self.log_validity_error(
                     'DeltaK2 ({}) must be <= 1/(2*SS) ({})'.format(self.DeltaK2, 1./(2*self.SS)))
                 out = False
         except (AttributeError, TypeError, ValueError):
@@ -447,8 +533,25 @@ class DirParamType(Serializable):
 
         try:
             if self.DeltaK1 < -1./(2*self.SS) - 1e-10:
-                logging.error(
+                self.log_validity_error(
                     'DeltaK1 ({}) must be >= -1/(2*SS) ({})'.format(self.DeltaK1, -1./(2*self.SS)))
+                out = False
+        except (AttributeError, TypeError, ValueError):
+            pass
+
+        min_deltak, max_deltak = self.estimate_deltak(x_coords, y_coords, populate=False)
+        try:
+            if abs(self.DeltaK1/min_deltak - 1) > 1e-2:
+                self.log_validity_error(
+                    'The DeltaK1 value is populated as {}, but estimated to be {}'.format(self.DeltaK1, min_deltak))
+                out = False
+        except (AttributeError, TypeError, ValueError):
+            pass
+
+        try:
+            if abs(self.DeltaK2/max_deltak - 1) > 1e-2:
+                self.log_validity_error(
+                    'The DeltaK2 value is populated as {}, but estimated to be {}'.format(self.DeltaK2, max_deltak))
                 out = False
         except (AttributeError, TypeError, ValueError):
             pass
@@ -458,7 +561,7 @@ class DirParamType(Serializable):
         out = True
         try:
             if self.ImpRespBW > (self.DeltaK2 - self.DeltaK1) + 1e-10:
-                logging.error(
+                self.log_validity_error(
                     'ImpRespBW ({}) must be <= DeltaK2 - DeltaK1 '
                     '({})'.format(self.ImpRespBW, self.DeltaK2 - self.DeltaK1))
                 out = False
@@ -466,16 +569,55 @@ class DirParamType(Serializable):
             pass
         return out
 
+    def _check_wgt(self):
+        cond = True
+        if self.WgtType is None:
+            return cond
+
+        wgt_size = self.WgtFunct.size if self.WgtFunct is not None else None
+        if self.WgtType.WindowName not in ['UNIFORM', 'UNKNOWN'] and (wgt_size is None or wgt_size < 2):
+            self.log_validity_error(
+                'Non-uniform weighting indicated, but WgtFunct not properly defined')
+            return False
+
+        if wgt_size is not None and wgt_size > 1024:
+            self.log_validity_warning(
+                'WgtFunct with {} elements is provided.\n'
+                'The recommended number of elements is 512, '
+                'and many more is likely needlessly excessive.'.format(wgt_size))
+
+        result = self.define_response_widths(populate=False)
+        if result is None:
+            return cond
+        resp_bw, resp_wid = result
+        if abs(resp_bw/self.ImpRespBW - 1) > 1e-2:
+            self.log_validity_error(
+                'ImpRespBW expected as {} from weighting,\n'
+                'but populated as {}'.format(resp_bw, self.ImpRespBW))
+            cond = False
+        if abs(resp_wid/self.ImpRespWid - 1) > 1e-2:
+            self.log_validity_error(
+                'ImpRespWid expected as {} from weighting,\n'
+                'but populated as {}'.format(resp_wid, self.ImpRespWid))
+            cond = False
+        return cond
+
     def _basic_validity_check(self):
         condition = super(DirParamType, self)._basic_validity_check()
         if (self.WgtFunct is not None) and (self.WgtFunct.size < 2):
-            logging.error(
-                'The WgtFunct array has been defined in DirParamType, but there are fewer than 2 entries.')
+            self.log_validity_error(
+                'The WgtFunct array has been defined in DirParamType, '
+                'but there are fewer than 2 entries.')
             condition = False
-
-        condition &= self._check_deltak()
+        for attribute in ['SS', 'ImpRespBW', 'ImpRespWid']:
+            value = getattr(self, attribute)
+            if value is not None and value <= 0:
+                self.log_validity_error(
+                    'attribute {} is populated as {}, '
+                    'but should be strictly positive.'.format(attribute, value))
+                condition = False
         condition &= self._check_bw()
-
+        condition &= self._check_wgt()
         return condition
 
 
@@ -568,12 +710,20 @@ class GridType(Serializable):
             if valid_vertices is None:
                 valid_vertices = ImageData.get_full_vertex_data()
 
+        x_coords, y_coords = None, None
+        if valid_vertices is not None:
+            try:
+                x_coords = self.Row.SS*(valid_vertices[:, 0] - (ImageData.SCPPixel.Row -  ImageData.FirstRow))
+                y_coords = self.Col.SS*(valid_vertices[:, 1] - (ImageData.SCPPixel.Col -  ImageData.FirstCol))
+            except (AttributeError, ValueError):
+                pass
+
         for attribute in ['Row', 'Col']:
             value = getattr(self, attribute, None)
             if value is not None:
-                value.define_weight_function()
+                value.define_weight_function(populate=True)
                 value.define_response_widths()
-                value.estimate_deltak(valid_vertices)
+                value.estimate_deltak(x_coords, y_coords, populate=True)
 
     def _derive_time_coa_poly(self, CollectionInfo, SCPCOA):
         """
@@ -922,10 +1072,31 @@ class GridType(Serializable):
         condition = super(GridType, self)._basic_validity_check()
         if self.Row is not None and self.Row.Sgn is not None and self.Col is not None \
                 and self.Col.Sgn is not None and self.Row.Sgn != self.Col.Sgn:
-            logging.warning(
+            self.log_validity_warning(
                 'Row.Sgn ({}) and Col.Sgn ({}) should almost certainly be the '
                 'same value'.format(self.Row.Sgn, self.Col.Sgn))
         return condition
+
+    def check_deltak(self, x_coords, y_coords):
+        """
+        Checks the validity of DeltaK values.
+
+        Parameters
+        ----------
+        x_coords : None|numpy.ndarray
+        y_coords : None|numpy.ndarray
+
+        Returns
+        -------
+        bool
+        """
+
+        cond = True
+        if self.Row is not None:
+            cond &= self.Row.check_deltak(x_coords, y_coords)
+        if self.Col is not None:
+            cond &= self.Col.check_deltak(x_coords, y_coords)
+        return cond
 
     def get_resolution_abbreviation(self):
         """
@@ -940,8 +1111,28 @@ class GridType(Serializable):
                 self.Col is None or self.Col.ImpRespWid is None:
             return '0000'
         else:
-            value = int(100*(self.Row.ImpRespWid*self.Col.ImpRespWid)**0.5)
+            value = int(100*(abs(self.Row.ImpRespWid)*abs(self.Col.ImpRespWid))**0.5)
             if value > 9999:
                 return '9999'
             else:
                 return '{0:04d}'.format(value)
+
+    def get_slant_plane_area(self):
+        """
+        Get the weighted slant plane area.
+
+        Returns
+        -------
+        float
+        """
+
+        range_weight_f = azimuth_weight_f = 1.0
+        if self.Row.WgtFunct is not None:
+            var = numpy.var(self.Row.WgtFunct)
+            mean = numpy.mean(self.Row.WgtFunct)
+            range_weight_f += var/(mean*mean)
+        if self.Col.WgtFunct is not None:
+            var = numpy.var(self.Col.WgtFunct)
+            mean = numpy.mean(self.Col.WgtFunct)
+            azimuth_weight_f += var/(mean*mean)
+        return (range_weight_f * azimuth_weight_f)/(self.Row.ImpRespBW*self.Col.ImpRespBW)

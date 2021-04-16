@@ -3,15 +3,17 @@
 Common functionality for converting metadata
 """
 
+__classification__ = "UNCLASSIFIED"
+__author__ = "Thomas McCullough"
+
+
 import logging
+from typing import Iterator
 
 import numpy
 from numpy.polynomial import polynomial
 
-from .sicd_elements.blocks import Poly2DType
-
-__classification__ = "UNCLASSIFIED"
-__author__ = "Thomas McCullough"
+from sarpy.io.complex.sicd_elements.blocks import Poly2DType
 
 
 def two_dim_poly_fit(x, y, z, x_order=2, y_order=2, x_scale=1, y_scale=1, rcond=None):
@@ -58,7 +60,6 @@ def two_dim_poly_fit(x, y, z, x_order=2, y_order=2, x_scale=1, y_scale=1, rcond=
         A[:, i] = numpy.power(x, index[0])*numpy.power(y, index[1])
     # perform least squares fit
     sol, residuals, rank, sing_values = numpy.linalg.lstsq(A, z, rcond=rcond)
-    # NB: it seems like this problem is not always well-conditioned (TimeCOAPoly, at least)
     if len(residuals) != 0:
         residuals /= float(x.size)
     sol = numpy.power(x_scale, numpy.arange(x_order+1))[:, numpy.newaxis] * \
@@ -87,9 +88,9 @@ def get_im_physical_coords(array, grid, image_data, direction):
     """
 
     if direction.upper() == 'ROW':
-        return (array - image_data.SCPPixel.Row)*grid.Row.SS
+        return (array - image_data.SCPPixel.Row + image_data.FirstRow)*grid.Row.SS
     elif direction.upper() == 'COL':
-        return (array - image_data.SCPPixel.Col)*grid.Col.SS
+        return (array - image_data.SCPPixel.Col + image_data.FirstCol)*grid.Col.SS
     else:
         raise ValueError('Unrecognized direction {}'.format(direction))
 
@@ -112,11 +113,11 @@ def fit_time_coa_polynomial(inca, image_data, grid, dop_rate_scaled_coeffs, poly
     Poly2DType
     """
 
-    grid_samples = poly_order + 3
+    grid_samples = poly_order + 8
     coords_az = get_im_physical_coords(
-        numpy.linspace(0, image_data.NumCols - 1, grid_samples, dtype=numpy.float64), grid, image_data, 'col')
+        numpy.linspace(0, image_data.NumCols - 1, grid_samples, dtype='float64'), grid, image_data, 'col')
     coords_rg = get_im_physical_coords(
-        numpy.linspace(0, image_data.NumRows - 1, grid_samples, dtype=numpy.float64), grid, image_data, 'row')
+        numpy.linspace(0, image_data.NumRows - 1, grid_samples, dtype='float64'), grid, image_data, 'row')
     coords_az_2d, coords_rg_2d = numpy.meshgrid(coords_az, coords_rg)
     time_ca_sampled = inca.TimeCAPoly(coords_az_2d)
     dop_centroid_sampled = inca.DopCentroidPoly(coords_rg_2d, coords_az_2d)
@@ -219,14 +220,14 @@ def fit_position_xvalidation(time_array, position_array, velocity_array, max_deg
     max_degree = int(max_degree)
     if max_degree < 1:
         raise ValueError('max_degree must be at least 1.')
-    if max_degree > 6:
-        logging.warning('max_degree greater than 6 for polynomial fitting is very likely to lead '
+    if max_degree > 10:
+        logging.warning('max_degree greater than 10 for polynomial fitting may lead '
                         'to poorly conditioned (i.e. badly behaved) fit.')
 
     deg = 1
     prev_vel_error = numpy.inf
     P_x, P_y, P_z = None, None, None
-    while deg < min(max_degree, position_array.shape[0]):
+    while deg <= min(max_degree, position_array.shape[0]-1):
         # fit position
         P_x = polynomial.polyfit(time_array, position_array[:, 0], deg=deg)
         P_y = polynomial.polyfit(time_array, position_array[:, 1], deg=deg)
@@ -244,3 +245,70 @@ def fit_position_xvalidation(time_array, position_array, velocity_array, max_deg
         if cur_vel_error >= prev_vel_error:
             break
     return P_x, P_y, P_z
+
+
+def sicd_reader_iterator(reader, partitions=None, polarization=None, band=None):
+    """
+    Provides an iterator over a collection of partitions (tuple of tuple of integer
+    indices for the reader) for a sicd type reader object.
+
+    Parameters
+    ----------
+    reader : BaseReader
+    partitions : None|tuple
+        The partitions collection. If None, then partitioning from
+        `reader.get_sicd_partitions()` will be used.
+    polarization : None|str
+        The polarization string to match.
+    band : None|str
+        The band to match.
+
+    Returns
+    -------
+    Iterator[tuple]
+        Yields the partition index, the sicd reader index, and the sicd structure.
+    """
+
+    def sicd_match():
+        match = True
+        if band is not None:
+            match &= (this_sicd.get_transmit_band_name() == band)
+        if polarization is not None:
+            match &= (this_sicd.get_processed_polarization() == polarization)
+        return match
+
+    from sarpy.io.general.base import BaseReader  # avoid circular import issue
+
+    if not isinstance(reader, BaseReader):
+        raise TypeError('reader must be an instance of BaseReader. Got type {}'.format(type(reader)))
+    if reader.reader_type != "SICD":
+        raise ValueError('The provided reader must be of SICD type.')
+
+    if partitions is None:
+        partitions = reader.get_sicd_partitions()
+    the_sicds = reader.get_sicds_as_tuple()
+    for this_partition, entry in enumerate(partitions):
+        for this_index in entry:
+            this_sicd = the_sicds[this_index]
+            if sicd_match():
+                yield this_partition, this_index, this_sicd
+
+
+def get_physical_coordinates(the_sicd, row_value, col_value):
+    """
+    Transform from image coordinates to physical coordinates, for polynomial evaluation.
+
+    Parameters
+    ----------
+    the_sicd : sarpy.io.complex.sicd_elements.SICD.SICDType
+    row_value : int|float|numpy.ndarray
+    col_value : int|float|numpy.ndarray
+
+    Returns
+    -------
+    tuple
+        The row and colummn physical coordinates
+    """
+
+    return get_im_physical_coords(row_value, the_sicd.Grid, the_sicd.ImageData, 'row'), \
+           get_im_physical_coords(col_value, the_sicd.Grid, the_sicd.ImageData, 'col')
