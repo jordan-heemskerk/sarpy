@@ -1,7 +1,10 @@
-# -*- coding: utf-8 -*-
 """
 Functionality for reading NISAR data into a SICD model.
 """
+
+__classification__ = "UNCLASSIFIED"
+__author__ = "Thomas McCullough"
+
 
 import logging
 import os
@@ -12,12 +15,8 @@ import numpy
 from numpy.polynomial import polynomial
 from scipy.constants import speed_of_light
 
-try:
-    import h5py
-except ImportError:
-    h5py = None
-
 from sarpy.compliance import string_types, int_func, bytes_to_string
+from sarpy.io.complex.base import SICDTypeReader, H5Chipper, h5py, is_hdf5
 from sarpy.io.complex.sicd_elements.blocks import Poly2DType
 from sarpy.io.complex.sicd_elements.SICD import SICDType
 from sarpy.io.complex.sicd_elements.CollectionInfo import CollectionInfoType, RadarModeType
@@ -34,13 +33,9 @@ from sarpy.io.complex.sicd_elements.ImageFormation import ImageFormationType, Tx
 from sarpy.io.complex.sicd_elements.RMA import RMAType, INCAType
 from sarpy.io.complex.sicd_elements.Radiometric import RadiometricType, NoiseLevelType_
 from sarpy.geometry import point_projection
-from sarpy.io.general.base import BaseReader
-from sarpy.io.general.utils import get_seconds, parse_timestring
-from sarpy.io.complex.csk import H5Chipper
+from sarpy.io.general.base import BaseReader, SarpyIOError
+from sarpy.io.general.utils import get_seconds, parse_timestring, is_file_like
 from sarpy.io.complex.utils import fit_position_xvalidation, two_dim_poly_fit
-
-__classification__ = "UNCLASSIFIED"
-__author__ = "Thomas McCullough"
 
 
 ########
@@ -53,7 +48,7 @@ def is_a(file_name):
 
     Parameters
     ----------
-    file_name : str
+    file_name : str|BinaryIO
         the file_name to check
 
     Returns
@@ -62,6 +57,12 @@ def is_a(file_name):
         `NISARReader` instance if NISAR file, `None` otherwise
     """
 
+    if is_file_like(file_name):
+        return None
+
+    if not is_hdf5(file_name):
+        return None
+
     if h5py is None:
         return None
 
@@ -69,7 +70,7 @@ def is_a(file_name):
         nisar_details = NISARDetails(file_name)
         logging.info('File {} is determined to be a NISAR file.'.format(file_name))
         return NISARReader(nisar_details)
-    except (ImportError, IOError):
+    except (ImportError, SarpyIOError):
         return None
 
 
@@ -135,7 +136,7 @@ class NISARDetails(object):
             raise ImportError("Can't read NISAR files, because the h5py dependency is missing.")
 
         if not os.path.isfile(file_name):
-            raise IOError('Path {} is not a file'.format(file_name))
+            raise SarpyIOError('Path {} is not a file'.format(file_name))
 
         with h5py.File(file_name, 'r') as hf:
             # noinspection PyBroadException
@@ -143,7 +144,7 @@ class NISARDetails(object):
                 # noinspection PyUnusedLocal
                 gp = hf['/science/LSAR/SLC']
             except:
-                raise IOError('The hdf5 file does not have required path /science/LSAR/SLC')
+                raise SarpyIOError('The hdf5 file does not have required path /science/LSAR/SLC')
 
         self._file_name = file_name
 
@@ -678,7 +679,7 @@ class NISARDetails(object):
 ################
 # The NISAR reader
 
-class NISARReader(BaseReader):
+class NISARReader(BaseReader, SICDTypeReader):
     """
     Gets a reader type object for NISAR files
     """
@@ -706,7 +707,9 @@ class NISARReader(BaseReader):
         for band_name in sicd_data:
             sicds.append(sicd_data[band_name])
             chippers.append(H5Chipper(nisar_details.file_name, band_name, shape_dict[band_name], symmetry))
-        super(NISARReader, self).__init__(tuple(sicds), tuple(chippers), reader_type="SICD")
+
+        SICDTypeReader.__init__(self, tuple(sicds))
+        BaseReader.__init__(self, tuple(chippers), reader_type="SICD")
 
     @property
     def nisar_details(self):

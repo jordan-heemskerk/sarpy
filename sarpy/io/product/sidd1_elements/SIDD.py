@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 The SIDDType 1.0 definition.
 """
@@ -9,7 +8,7 @@ from collections import OrderedDict
 
 # noinspection PyProtectedMember
 from sarpy.io.complex.sicd_elements.base import Serializable, _SerializableDescriptor, DEFAULT_STRICT
-from sarpy.io.product.sidd2_elements.ProductCreation import ProductCreationType
+from .ProductCreation import ProductCreationType
 from .Display import ProductDisplayType
 from .GeographicAndTarget import GeographicAndTargetType
 from .Measurement import MeasurementType
@@ -418,7 +417,7 @@ class SIDDType(Serializable):
         """
 
         return OrderedDict([
-            ('DESSHSI', _SIDD_SPECIFICATION_VERSION),
+            ('DESSHSI', _SIDD_SPECIFICATION_IDENTIFIER),
             ('DESSHSV', _SIDD_SPECIFICATION_VERSION),
             ('DESSHSD', _SIDD_SPECIFICATION_DATE),
             ('DESSHTN', _SIDD_URN)])

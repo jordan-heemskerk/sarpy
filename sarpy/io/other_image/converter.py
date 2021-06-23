@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 This module provide utilities for attempting to open other image files not opened by
 the sicd, sidd, or cphd reader collections.
@@ -9,7 +8,7 @@ import sys
 import pkgutil
 from importlib import import_module
 
-from sarpy.io.general.base import BaseReader
+from sarpy.io.general.base import BaseReader, SarpyIOError
 
 
 __classification__ = "UNCLASSIFIED"
@@ -94,11 +93,11 @@ def open_other(file_name):
 
     Raises
     ------
-    IOError
+    SarpyIOError
     """
 
     if not os.path.exists(file_name):
-        raise IOError('File {} does not exist.'.format(file_name))
+        raise SarpyIOError('File {} does not exist.'.format(file_name))
     # parse openers, if not already done
     parse_openers()
     # see if we can find a reader though trial and error
@@ -108,4 +107,4 @@ def open_other(file_name):
             return reader
 
     # If for loop completes, no matching file format was found.
-    raise IOError('Unable to determine image format.')
+    raise SarpyIOError('Unable to determine image format.')

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Setup module for SarPy.
 """
@@ -7,7 +6,6 @@ import os
 import sys
 from setuptools import setup, find_packages
 from codecs import open
-
 
 
 # Get the long description from the README file
@@ -23,6 +21,22 @@ with open(os.path.join(here, 'sarpy', '__about__.py'), 'r') as f:
     exec(f.read(), parameters)
 
 
+def my_package_data():
+    def find_dirs(init_dir, start, the_list):
+        for root, dirs, files in os.walk(os.path.join(init_dir, start)):
+            include_root = False
+            for fil in files:
+                if os.path.splitext(fil)[1] == '.xsd':
+                    include_root = True
+                    break
+            if include_root:
+                the_list.append(root[len(init_dir):] + '/*.xsd')
+
+    package_list = ['io/complex/sicd_schema/*.xsd', 'io/phase_history/cphd_schema/*.xsd']
+    find_dirs('sarpy', 'io/product/sidd_schema/', package_list)
+    return package_list
+
+
 def my_test_suite():
     if sys.version_info[0] < 3:
         import unittest2 as unittest
@@ -32,14 +46,15 @@ def my_test_suite():
     test_suite = test_loader.discover('tests', top_level_dir='.')
     return test_suite
 
+
 setup(name=parameters['__title__'],
       version=parameters['__version__'],
       description=parameters['__summary__'],
       long_description=long_description,
       long_description_content_type='text/markdown',
       packages=find_packages(exclude=('*tests*', )),
-      package_data={'sarpy': ['io/complex/sicd_schema/*.xsd',
-                              'io/phase_history/cphd_schema/*.xsd', ]},
+      include_package_data=True,
+      package_data={'sarpy': my_package_data()},
       url=parameters['__url__'],
       author=parameters['__author__'],
       author_email=parameters['__email__'],  # The primary POC

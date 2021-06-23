@@ -1,7 +1,10 @@
-# -*- coding: utf-8 -*-
 """
 Functionality for reading TerraSAR-X data into a SICD model.
 """
+
+__classification__ = "UNCLASSIFIED"
+__author__ = "Thomas McCullough"
+
 
 import os
 import logging
@@ -15,9 +18,10 @@ from numpy.polynomial import polynomial
 from scipy.constants import speed_of_light
 
 from sarpy.compliance import string_types, int_func
-from sarpy.io.general.base import BaseReader, SubsetChipper, BIPChipper
-from sarpy.io.general.utils import get_seconds, parse_timestring
+from sarpy.io.general.base import BaseReader, SubsetChipper, BIPChipper, SarpyIOError
+from sarpy.io.general.utils import get_seconds, parse_timestring, is_file_like
 
+from sarpy.io.complex.base import SICDTypeReader
 from sarpy.io.complex.sicd_elements.blocks import Poly1DType, Poly2DType
 from sarpy.io.complex.sicd_elements.SICD import SICDType
 from sarpy.io.complex.sicd_elements.CollectionInfo import CollectionInfoType, RadarModeType
@@ -33,10 +37,6 @@ from sarpy.io.complex.sicd_elements.ImageFormation import ImageFormationType, Rc
 from sarpy.io.complex.sicd_elements.RMA import RMAType, INCAType
 from sarpy.io.complex.sicd_elements.Radiometric import RadiometricType, NoiseLevelType_
 from sarpy.io.complex.utils import two_dim_poly_fit, fit_position_xvalidation
-
-
-__classification__ = "UNCLASSIFIED"
-__author__ = "Thomas McCullough"
 
 
 ########
@@ -58,11 +58,14 @@ def is_a(file_name):
         `TSXReader` instance if TerraSAR-X file file, `None` otherwise
     """
 
+    if is_file_like(file_name):
+        return None
+
     try:
         tsx_details = TSXDetails(file_name)
         logging.info('Path {} is determined to be a TerraSAR-X file package.'.format(tsx_details.file_name))
         return TSXReader(tsx_details)
-    except (IOError, AttributeError, SyntaxError, ElementTree.ParseError):
+    except (SarpyIOError, AttributeError, SyntaxError, ElementTree.ParseError):
         return None
 
 
@@ -132,9 +135,9 @@ class TSXDetails(object):
         """
 
         if not isinstance(file_name, string_types):
-            raise IOError('file_name must be of string type.')
+            raise SarpyIOError('file_name must be of string type.')
         if not os.path.exists(file_name):
-            raise IOError('file {} does not exist'.format(file_name))
+            raise SarpyIOError('file {} does not exist'.format(file_name))
 
         found_file = None
         if os.path.isdir(file_name):
@@ -145,16 +148,16 @@ class TSXDetails(object):
                     found_file = prop_file
 
             if found_file is None:
-                raise IOError(
+                raise SarpyIOError(
                     'The provided argument is a directory, but we found no level1Product xml file at the top level.')
         elif os.path.splitext(file_name)[1] == '.xml':
             if _is_level1_product(file_name):
                 found_file = file_name
             else:
-                raise IOError(
+                raise SarpyIOError(
                     'The provided argument is an xml file, which is not a level1Product xml file.')
         else:
-            raise IOError(
+            raise SarpyIOError(
                 'The provided argument is an file, but does not have .xml extension.')
 
         if file_name is None:
@@ -928,7 +931,7 @@ class COSARDetails(object):
         self._data_sizes = []
 
         if not os.path.isfile(file_name):
-            raise IOError('path {} is not not a file'.format(file_name))
+            raise SarpyIOError('path {} is not not a file'.format(file_name))
         self._file_name = file_name
         self._file_size = os.path.getsize(file_name)
         self._parse_details()
@@ -958,7 +961,7 @@ class COSARDetails(object):
             raise ValueError(
                 'The seek location + basic header size is greater than the file size.')
         # seek to our desired location
-        fi.seek(the_offset, 0)
+        fi.seek(the_offset, os.SEEK_SET)
         # read the desired bytes
         header_bytes = fi.read(48)
         # interpret the data
@@ -1055,7 +1058,7 @@ class COSARDetails(object):
 #########
 # the reader implementation
 
-class TSXReader(BaseReader):
+class TSXReader(BaseReader, SICDTypeReader):
     """
     The TerraSAR-X reader implementation
     """
@@ -1093,7 +1096,9 @@ class TSXReader(BaseReader):
                 raise ValueError(
                     'Expected one burst in the COSAR file {}, but got {} bursts'.format(the_file, cosar_details.burst_count))
             chippers.append(cosar_details.construct_chipper(0, symmetry, (cols, rows)))
-        super(TSXReader, self).__init__(tuple(the_sicds), tuple(chippers), reader_type="SICD")
+
+        SICDTypeReader.__init__(self, tuple(the_sicds))
+        BaseReader.__init__(self, tuple(chippers), reader_type="SICD")
 
     @property
     def file_name(self):

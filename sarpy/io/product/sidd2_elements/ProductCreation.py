@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 The ProductCreationType definition.
 """
@@ -19,6 +18,41 @@ from sarpy.io.complex.sicd_elements.SICD import SICDType
 
 __classification__ = "UNCLASSIFIED"
 __author__ = "Thomas McCullough"
+
+
+def extract_classification_from_sicd(sicd):
+    """
+    Extract a SIDD style classification from a SICD classification string.
+
+    Parameters
+    ----------
+    sicd : SICDType
+
+    Returns
+    -------
+    str
+    """
+
+    if not isinstance(sicd, SICDType):
+        raise TypeError('Requires SICDType instance, got type {}'.format(type(sicd)))
+
+    c_str = sicd.CollectionInfo.Classification.upper().split('//')[0].strip()
+
+    clas = None
+    if c_str.startswith('UNCLASS') or c_str == 'U':
+        clas = 'U'
+    elif c_str.startswith('CONF') or c_str == 'C':
+        clas = 'C'
+    elif c_str.startswith('TOP ') or c_str == 'TS':
+        clas = 'TS'
+    elif c_str.startswith('SEC') or c_str == 'S':
+        clas = 'S'
+    elif c_str == 'FOUO' or c_str.startswith('REST') or c_str == 'R':
+        clas = 'R'
+    else:
+        logging.critical('Unclear how to extract classification code for classification string {}. '
+                         'It will default to unclassified, and should be set appropriately.'.format(c_str))
+    return clas
 
 
 class ProcessorInformationType(Serializable):
@@ -76,7 +110,9 @@ class ProductClassificationType(Serializable):
         'classificationReason', 'nonUSControls', 'derivedFrom', 'declassDate',
         'declassEvent', 'declassException', 'typeOfExemptedSource', 'dateOfExemptedSource',
         'SecurityExtensions')
-    _required = ('DESVersion', 'createDate', 'classification', 'ownerProducer', 'compliesWith', 'ISMCATCESVersion')
+    _required = (
+        'DESVersion', 'createDate', 'classification', 'ownerProducer', 'compliesWith',
+        'ISMCATCESVersion')
     _collections_tags = {'SecurityExtensions': {'array': False, 'child_tag': 'SecurityExtension'}}
     _set_as_attribute = (
         'DESVersion', 'resourceElement', 'createDate', 'compliesWith', 'ISMCATCESVersion',
@@ -94,9 +130,10 @@ class ProductClassificationType(Serializable):
     createDate = _StringDescriptor(
         'createDate', _required, strict=DEFAULT_STRICT,
         docstring='This should be a date of format :code:`YYYY-MM-DD`, but this is not checked.')  # type: str
-    compliesWith = _StringDescriptor(
-        'compliesWith', _required, strict=DEFAULT_STRICT, default_value='USGov',
-        docstring='')  # type: Union[None, str]
+    compliesWith = _StringEnumDescriptor(
+        'compliesWith', ('USGov', 'USIC', 'USDOD', 'OtherAuthority'), _required,
+        strict=DEFAULT_STRICT, default_value='USGov',
+        docstring='The ISM rule sets with which the document may complies.')  # type: Union[None, str]
     ISMCATCESVersion = _StringDescriptor(
         'ISMCATCESVersion', _required, strict=DEFAULT_STRICT, default_value='201903',
         docstring='')  # type: Union[None, str]
@@ -254,25 +291,7 @@ class ProductClassificationType(Serializable):
         ProductClassificationType
         """
 
-        if not isinstance(sicd, SICDType):
-            raise TypeError('Requires SICDType instance, got type {}'.format(type(sicd)))
-
-        c_str = sicd.CollectionInfo.Classification
-
-        if 'UNCLASS' in c_str.upper():
-            clas = 'U'
-        elif 'CONFIDENTIAL' in c_str.upper():
-            clas = 'C'
-        elif 'TOP SECRET' in c_str.upper():
-            clas = 'TS'
-        elif 'SECRET' in c_str.upper():
-            clas = 'S'
-        elif 'FOUO' in c_str.upper() or 'RESTRICTED' in c_str.upper():
-            clas = 'R'
-        else:
-            logging.critical('Unclear how to extract classification code for classification string {}. '
-                             'Should be set appropriately.'.format(c_str))
-            clas = None
+        clas = extract_classification_from_sicd(sicd)
 
         if create_date is None:
             create_date = datetime.now().strftime('%Y-%m-%d')

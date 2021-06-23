@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Work in progress for reading some other kind of complex NITF.
 """
@@ -18,11 +17,15 @@ from sarpy.compliance import string_types
 from sarpy.geometry.geocoords import geodetic_to_ecf, ned_to_ecf
 from sarpy.geometry.latlon import num as lat_lon_parser
 
+from sarpy.io.general.base import SarpyIOError
 from sarpy.io.general.nitf import extract_image_corners, NITFDetails, NITFReader
 from sarpy.io.general.nitf_elements.image import ImageSegmentHeader, ImageSegmentHeader0
 from sarpy.io.general.nitf_elements.nitf_head import NITFHeader, NITFHeader0
 from sarpy.io.general.nitf_elements.base import TREList
+from sarpy.io.general.nitf_elements.tres.unclass.CMETAA import CMETAA
+from sarpy.io.general.utils import is_file_like
 
+from sarpy.io.complex.base import SICDTypeReader
 from sarpy.io.complex.sicd_elements.SICD import SICDType
 from sarpy.io.complex.sicd_elements.CollectionInfo import CollectionInfoType
 from sarpy.io.complex.sicd_elements.ImageData import ImageDataType
@@ -36,8 +39,6 @@ from sarpy.io.complex.sicd_elements.ImageFormation import ImageFormationType, Tx
 from sarpy.io.complex.sicd_elements.ImageCreation import ImageCreationType
 from sarpy.io.complex.sicd_elements.PFA import PFAType
 
-from sarpy.io.general.nitf_elements.tres.unclass.CMETAA import CMETAA
-
 
 # NB: DO NOT implement is_a() here. This will explicitly happen after other readers
 
@@ -48,7 +49,7 @@ def final_attempt(file_name):
 
     Parameters
     ----------
-    file_name : str
+    file_name : str|BinaryIO
         the file_name to check
 
     Returns
@@ -56,11 +57,14 @@ def final_attempt(file_name):
     ComplexNITFReader|None
     """
 
+    if is_file_like(file_name):
+        return None
+
     try:
         nitf_details = ComplexNITFDetails(file_name)
         logging.info('File {} is determined to be some other format complex NITF.')
         return ComplexNITFReader(nitf_details)
-    except (IOError, ValueError):
+    except (SarpyIOError, ValueError):
         return None
 
 
@@ -884,10 +888,10 @@ class ComplexNITFDetails(NITFDetails):
         self._complex_segments = None
         super(ComplexNITFDetails, self).__init__(file_name)
         if self._nitf_header.ImageSegments.subhead_sizes.size == 0:
-            raise IOError('There are no image segments defined.')
+            raise SarpyIOError('There are no image segments defined.')
         self._find_complex_image_segments()
         if self._complex_segments is None:
-            raise IOError('No complex valued (I/Q) image segments found in file {}'.format(file_name))
+            raise SarpyIOError('No complex valued (I/Q) image segments found in file {}'.format(file_name))
 
     @property
     def complex_segments(self):
@@ -1040,7 +1044,7 @@ class ComplexNITFDetails(NITFDetails):
             self._sicd_meta = tuple(sicd_meta)
 
 
-class ComplexNITFReader(NITFReader):
+class ComplexNITFReader(NITFReader, SICDTypeReader):
     """
     A reader for complex valued NITF elements, this should be explicitly tried AFTER
     the SICDReader.
@@ -1063,6 +1067,8 @@ class ComplexNITFReader(NITFReader):
         if not isinstance(nitf_details, ComplexNITFDetails):
             raise TypeError('The input argument for ComplexNITFReader must be a filename or '
                             'ComplexNITFDetails object.')
+
+        SICDTypeReader.__init__(self, nitf_details.sicd_meta)
         super(ComplexNITFReader, self).__init__(nitf_details, reader_type="SICD", symmetry=symmetry)
 
     @property

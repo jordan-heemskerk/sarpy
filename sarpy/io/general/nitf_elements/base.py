@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Base NITF Header functionality definition.
 """
@@ -558,7 +557,6 @@ class NITFElement(BaseNITFElement):
 
         if attribute not in cls._ordering:
             raise ValueError('Unexpected attribute {}'.format(attribute))
-
         if attribute in fields:
             return start
         if attribute in cls._binary_format:
@@ -719,7 +717,7 @@ class Unstructured(NITFElement):
         super(Unstructured, self).__init__(data=data, **kwargs)
 
     @property
-    def data(self):  # type: () -> Union[None, bytes, NITFElement]
+    def data(self):  # type: () -> Union[None, bytes, NITFElement, TREList]
         return self._data
 
     @data.setter

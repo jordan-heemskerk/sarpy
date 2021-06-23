@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Functionality for reading Cosmo Skymed data into a SICD model.
 """
@@ -17,16 +16,12 @@ from numpy.polynomial import polynomial
 from scipy.constants import speed_of_light
 
 try:
-    import h5py
-except ImportError:
-    h5py = None
-
-try:
     from sarpy.io.complex import csk_addin
 except ImportError:
     csk_addin = None
 
 from sarpy.compliance import string_types, bytes_to_string
+from sarpy.io.complex.base import SICDTypeReader, H5Chipper, h5py, is_hdf5
 from sarpy.io.complex.sicd_elements.blocks import Poly1DType, Poly2DType, RowColType
 from sarpy.io.complex.sicd_elements.SICD import SICDType
 from sarpy.io.complex.sicd_elements.CollectionInfo import CollectionInfoType, RadarModeType
@@ -42,8 +37,8 @@ from sarpy.io.complex.sicd_elements.Timeline import TimelineType, IPPSetType
 from sarpy.io.complex.sicd_elements.ImageFormation import ImageFormationType, TxFrequencyProcType, RcvChanProcType
 from sarpy.io.complex.sicd_elements.RMA import RMAType, INCAType
 from sarpy.io.complex.sicd_elements.Radiometric import RadiometricType
-from sarpy.io.general.base import BaseChipper, BaseReader
-from sarpy.io.general.utils import get_seconds, parse_timestring
+from sarpy.io.general.base import BaseReader, SarpyIOError
+from sarpy.io.general.utils import get_seconds, parse_timestring, is_file_like
 from sarpy.io.complex.utils import fit_time_coa_polynomial, fit_position_xvalidation
 
 
@@ -57,7 +52,7 @@ def is_a(file_name):
 
     Parameters
     ----------
-    file_name : str
+    file_name : str|BinaryIO
         the file_name to check
 
     Returns
@@ -66,6 +61,12 @@ def is_a(file_name):
         `CSKReader` instance if Cosmo Skymed file, `None` otherwise
     """
 
+    if is_file_like(file_name):
+        return None
+
+    if not is_hdf5(file_name):
+        return None
+
     if h5py is None:
         return None
 
@@ -73,7 +74,7 @@ def is_a(file_name):
         csk_details = CSKDetails(file_name)
         logging.info('File {} is determined to be a Cosmo Skymed file.'.format(file_name))
         return CSKReader(csk_details)
-    except (ImportError, IOError):
+    except SarpyIOError:
         return None
 
 
@@ -111,17 +112,17 @@ class CSKDetails(object):
             raise ImportError("Can't read Cosmo Skymed files, because the h5py dependency is missing.")
 
         if not os.path.isfile(file_name):
-            raise IOError('Path {} is not a file'.format(file_name))
+            raise SarpyIOError('Path {} is not a file'.format(file_name))
 
         with h5py.File(file_name, 'r') as hf:
             try:
                 self._mission_id = hf.attrs['Mission ID'].decode('utf-8')
             except KeyError:
-                raise IOError('The hdf file does not have the top level attribute "Mission ID"')
+                raise SarpyIOError('The hdf file does not have the top level attribute "Mission ID"')
             try:
                 self._product_type = hf.attrs['Product Type'].decode('utf-8')
             except KeyError:
-                raise IOError('The hdf file does not have the top level attribute "Product Type"')
+                raise SarpyIOError('The hdf file does not have the top level attribute "Product Type"')
 
         if self._mission_id not in ['CSK', 'CSG', 'KMPS']:
             raise ValueError('Expected hdf5 attribute `Mission ID` should be one of "CSK", "CSG", or "KMPS"). '
@@ -399,20 +400,23 @@ class CSKDetails(object):
                 return numpy.array([0, ], dtype=arr.dtype)
             return arr[:last_ind]
 
+        dop_rate_poly_rg = h5_dict.get('Doppler Rate vs Range Time Polynomial', None)
+        if dop_rate_poly_rg is None:
+            dop_rate_poly_rg = band_dict[band_name].get('Doppler Rate vs Range Time Polynomial', None)
+        if dop_rate_poly_rg is None:
+            raise ValueError('No Doppler Rate Range Time polynomial found')
+        dop_rate_poly_rg = strip_poly(dop_rate_poly_rg)
+
         if self._mission_id in ['CSK', 'KMPS']:
             az_ref_time = h5_dict['Azimuth Polynomial Reference Time']  # seconds
             rg_ref_time = h5_dict['Range Polynomial Reference Time']
             dop_poly_az = strip_poly(h5_dict['Centroid vs Azimuth Time Polynomial'])
             dop_poly_rg = strip_poly(h5_dict['Centroid vs Range Time Polynomial'])
-            dop_rate_poly_rg = strip_poly(h5_dict['Doppler Rate vs Range Time Polynomial'])
         elif self._mission_id == 'CSG':
             az_ref_time = band_dict[band_name]['Azimuth Polynomial Reference Time']
             rg_ref_time = band_dict[band_name]['Range Polynomial Reference Time']
             dop_poly_az = strip_poly(band_dict[band_name]['Doppler Centroid vs Azimuth Time Polynomial'])
             dop_poly_rg = strip_poly(band_dict[band_name]['Doppler Centroid vs Range Time Polynomial'])
-            dop_rate_poly_rg = strip_poly(
-                band_dict[band_name].get('Doppler Rate vs Range Time Polynomial', numpy.array([-4000, ])))
-            # TODO: what to default, if this is not provided?
         else:
             raise ValueError('Unhandled mission id {}'.format(self._mission_id))
         return az_ref_time, rg_ref_time, dop_poly_az, dop_poly_rg, dop_rate_poly_rg
@@ -437,9 +441,9 @@ class CSKDetails(object):
             t_az_first_time = band_dict[band_name]['Zero Doppler Azimuth First Time']
             t_az_last_time = band_dict[band_name]['Zero Doppler Azimuth Last Time']
             t_ss_az_s = band_dict[band_name]['Line Time Interval']
-            t_use_sign = 1
+            t_use_sign2 = 1
             if h5_dict['Look Side'].upper() == 'LEFT':
-                t_use_sign = -1
+                t_use_sign2 = -1
                 t_az_first_time, t_az_last_time = t_az_last_time, t_az_first_time
             # zero doppler time of first row
             t_rg_first_time = band_dict[band_name]['Zero Doppler Range First Time']
@@ -454,28 +458,12 @@ class CSKDetails(object):
                                            PixelType=dtype_dict[band_name],
                                            SCPPixel=RowColType(Row=int(rows/2),
                                                                Col=int(cols/2)))
-            return t_rg_first_time, t_ss_rg_s, t_az_first_time, t_ss_az_s, t_use_sign
+            return t_rg_first_time, t_ss_rg_s, t_az_first_time, t_ss_az_s, t_use_sign2
 
         def check_switch_state():
-            # type: () -> Tuple[Poly1DType, Poly1DType, Poly1DType]
-            if self.mission_id in ['CSK', 'CSG']:
-                if t_dop_rate_poly_rg[0] > 0:  # TODO: Is this right?
-                    raise ValueError(
-                        'Got unexpected state, use_sign = {} and dop_rate_poly_rg = {}'.format(
-                            use_sign, t_dop_rate_poly_rg))
-                return (Poly1DType(Coefs=t_dop_poly_az),
-                        Poly1DType(Coefs=t_dop_poly_rg),
-                        Poly1DType(Coefs=t_dop_rate_poly_rg))
-            elif self.mission_id == 'KMPS':  # TODO: Is this right?
-                if (use_sign > 0 and t_dop_rate_poly_rg[0] > 0) or (use_sign < 0 and t_dop_rate_poly_rg[0] < 0):
-                    raise ValueError(
-                        'Got unexpected state, use_sign = {} and dop_rate_poly_rg = {}'.format(
-                            use_sign, t_dop_rate_poly_rg))
-                return (Poly1DType(Coefs=t_dop_poly_az),
-                        Poly1DType(Coefs=t_dop_poly_rg),
-                        Poly1DType(Coefs=use_sign*t_dop_rate_poly_rg))
-            else:
-                raise ValueError('Unhandled mission id {}'.format(self._mission_id))
+            # type: () -> Tuple[int, Poly1DType]
+            use_sign = 1 if t_dop_rate_poly_rg[0] < 0 else -1
+            return use_sign, Poly1DType(Coefs=use_sign*t_dop_rate_poly_rg)
 
         def update_timeline(sicd, band_name):
             # type: (SICDType, str) -> None
@@ -515,7 +503,7 @@ class CSKDetails(object):
         def update_rma_and_grid(sicd, band_name):
             # type: (SICDType, str) -> None
             rg_scp_time = rg_first_time + (ss_rg_s*sicd.ImageData.SCPPixel.Row)
-            az_scp_time = az_first_time + (use_sign*ss_az_s*sicd.ImageData.SCPPixel.Col)
+            az_scp_time = az_first_time + (use_sign2*ss_az_s*sicd.ImageData.SCPPixel.Col)
             r_ca_scp = rg_scp_time*speed_of_light/2
             sicd.RMA.INCA.R_CA_SCP = r_ca_scp
             # compute DRateSFPoly
@@ -537,16 +525,16 @@ class CSKDetails(object):
             # update grid.col
             col_ss = abs(vel_ca*ss_az_s*drate_sf_poly[0])
             sicd.Grid.Col.SS = col_ss
-            if self.mission_id in ['CSK', 'KMPS']:
+            if self.mission_id == 'CSK':
                 col_bw = min(band_dict[band_name]['Azimuth Focusing Transition Bandwidth']*ss_az_s, 1) / col_ss
-            elif self.mission_id == 'CSG':
+            elif self.mission_id in ['CSG', 'KMPS']:
                 col_bw = min(band_dict[band_name]['Azimuth Focusing Bandwidth']*ss_az_s, 1) / col_ss
             else:
                 raise ValueError('Got unhandled mission_id {}'.format(self.mission_id))
             sicd.Grid.Col.ImpRespBW = col_bw
             # update inca
             sicd.RMA.INCA.DRateSFPoly = Poly2DType(Coefs=numpy.reshape(drate_sf_poly, (-1, 1)))
-            sicd.RMA.INCA.TimeCAPoly = Poly1DType(Coefs=[scp_ca_time, use_sign*ss_az_s/col_ss])
+            sicd.RMA.INCA.TimeCAPoly = Poly1DType(Coefs=[scp_ca_time, use_sign2*ss_az_s/col_ss])
             # compute DopCentroidPoly & DeltaKCOAPoly
             dop_centroid_poly = numpy.zeros((dop_poly_rg.order1+1, dop_poly_az.order1+1), dtype=numpy.float64)
             dop_centroid_poly[0, 0] = dop_poly_rg(rg_scp_time-rg_ref_time) + \
@@ -569,7 +557,7 @@ class CSKDetails(object):
         def update_radiometric(sicd, band_name):
             # type: (SICDType, str) -> None
             if self.mission_id in ['KMPS', 'CSG']:
-                # TODO: skipping for now - strange results for flag == 77
+                # TODO: skipping for now - strange results for flag == 77. Awaiting gidance - see Wade.
                 return
             if h5_dict['Range Spreading Loss Compensation Geometry'] != 'NONE':
                 slant_range = h5_dict['Reference Slant Range']
@@ -603,12 +591,15 @@ class CSKDetails(object):
         for i, bd_name in enumerate(band_dict):
             az_ref_time, rg_ref_time, t_dop_poly_az, t_dop_poly_rg, t_dop_rate_poly_rg = \
                 self._get_dop_poly_details(h5_dict, band_dict, bd_name)
+            dop_poly_az = Poly1DType(Coefs=t_dop_poly_az)
+            dop_poly_rg = Poly1DType(Coefs=t_dop_poly_rg)
+
             t_sicd = base_sicd.copy()
             update_scp_prelim(t_sicd, bd_name)  # set preliminary value for SCP (required for projection)
             row_bw = band_dict[bd_name]['Range Focusing Bandwidth']*2/speed_of_light
             row_ss = band_dict[bd_name]['Column Spacing']
-            rg_first_time, ss_rg_s, az_first_time, ss_az_s, use_sign = update_image_data(t_sicd, bd_name)
-            dop_poly_az, dop_poly_rg, dop_rate_poly_rg = check_switch_state()
+            rg_first_time, ss_rg_s, az_first_time, ss_az_s, use_sign2 = update_image_data(t_sicd, bd_name)
+            use_sign, dop_rate_poly_rg = check_switch_state()
             update_timeline(t_sicd, bd_name)
             update_radar_collection(t_sicd, bd_name, i)
             update_rma_and_grid(t_sicd, bd_name)
@@ -650,53 +641,10 @@ class CSKDetails(object):
 
 
 ################
-# The CSK chipper and reader
-
-class H5Chipper(BaseChipper):
-    __slots__ = ('_file_name', '_band_name')
-
-    def __init__(self, file_name, band_name, data_size, symmetry, transform_data='COMPLEX'):
-        self._file_name = file_name
-        self._band_name = band_name
-        super(H5Chipper, self).__init__(data_size, symmetry=symmetry, transform_data=transform_data)
-
-    def _read_raw_fun(self, range1, range2):
-        def reorder(tr):
-            if tr[2] > 0:
-                return tr, False
-            else:
-                if tr[1] == -1 and tr[2] < 0:
-                    return (0, tr[0]+1, -tr[2]), True
-                else:
-                    return (tr[1], tr[0], -tr[2]), True
-
-        r1, r2 = self._reorder_arguments(range1, range2)
-        r1, rev1 = reorder(r1)
-        r2, rev2 = reorder(r2)
-        with h5py.File(self._file_name, 'r') as hf:
-            gp = hf[self._band_name]
-            if not isinstance(gp, h5py.Dataset):
-                raise ValueError(
-                    'hdf5 group {} is expected to be a dataset, got type {}'.format(self._band_name, type(gp)))
-            if len(gp.shape) not in (2, 3):
-                raise ValueError('Dataset {} has unexpected shape {}'.format(self._band_name, gp.shape))
-
-            if len(gp.shape) == 3:
-                data = gp[r1[0]:r1[1]:r1[2], r2[0]:r2[1]:r2[2], :]
-            else:
-                data = gp[r1[0]:r1[1]:r1[2], r2[0]:r2[1]:r2[2]]
-
-        if rev1 and rev2:
-            return data[::-1, ::-1]
-        elif rev1:
-            return data[::-1, :]
-        elif rev2:
-            return data[:, ::-1]
-        else:
-            return data
+# The CSK reader
 
 
-class CSKReader(BaseReader):
+class CSKReader(BaseReader, SICDTypeReader):
     """
     Gets a reader type object for Cosmo Skymed files
     """
@@ -731,7 +679,9 @@ class CSKReader(BaseReader):
 
             sicds.append(sicd_data[band_name])
             chippers.append(H5Chipper(csk_details.file_name, the_band, shape_dict[band_name], symmetry))
-        super(CSKReader, self).__init__(tuple(sicds), tuple(chippers), reader_type="SICD")
+
+        SICDTypeReader.__init__(self, tuple(sicds))
+        BaseReader.__init__(self, tuple(chippers), reader_type="SICD")
 
     @property
     def csk_details(self):

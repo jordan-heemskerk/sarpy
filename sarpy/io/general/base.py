@@ -1,30 +1,36 @@
-# -*- coding: utf-8 -*-
 """
-The base elements for reading and writing complex data files.
+The general base elements for reading and writing image files.
 """
+
+__classification__ = "UNCLASSIFIED"
+__author__ = "Thomas McCullough"
 
 import os
 import logging
-from typing import Union, Tuple
-from datetime import datetime
+from typing import Union, Tuple, BinaryIO, Callable
 
 import numpy
 
 from sarpy.compliance import int_func, integer_types, string_types
-from sarpy.io.complex.sicd_elements.SICD import SICDType
-from sarpy.io.complex.sicd_elements.ImageCreation import ImageCreationType
-from sarpy.io.complex.sicd_elements.utils import is_general_match
-from sarpy.__about__ import __title__, __version__
-from sarpy.io.general.utils import validate_range, reverse_range
+from sarpy.io.general.utils import validate_range, reverse_range, is_file_like
 
-
-__classification__ = "UNCLASSIFIED"
-__author__ = "Thomas McCullough"
 
 ##################
 # module variables
 _SUPPORTED_TRANSFORM_VALUES = ('COMPLEX', )
 READER_TYPES = ('SICD', 'SIDD', 'CPHD', 'OTHER')
+
+
+#################
+# some custom exceptions
+
+class SarpyError(Exception):
+    """A custom base exception class"""
+    pass
+
+
+class SarpyIOError(SarpyError):
+    """A custom exception class for discovered input/output errors."""
 
 
 #################
@@ -36,20 +42,22 @@ def validate_transform_data(transform_data):
 
     Parameters
     ----------
-    transform_data
+    transform_data : None|str|Callable
 
     Returns
     -------
-
+    None|str|Callable
     """
 
-    if not (transform_data is None or isinstance(transform_data, string_types) or callable(transform_data)):
-        raise ValueError('transform_data must be None, a string, or callable')
-    if isinstance(transform_data, string_types):
+    if transform_data is None or callable(transform_data):
+        return transform_data
+    elif isinstance(transform_data, string_types):
         transform_data = transform_data.upper()
         if transform_data not in _SUPPORTED_TRANSFORM_VALUES:
             raise ValueError('transform_data is string {}, which is not supported'.format(transform_data))
-    return transform_data
+        return transform_data
+    else:
+        raise ValueError('transform_data must be None, a string, or callable')
 
 
 class BaseChipper(object):
@@ -282,7 +290,7 @@ class BaseChipper(object):
     def _reorder_data(self, data):
         # type: (numpy.ndarray) -> numpy.ndarray
         if self._symmetry[2]:
-            data = numpy.swapaxes(data, 1, 0)
+            return numpy.copy(numpy.swapaxes(data, 1, 0))
         return data
 
     def _read_raw_fun(self, range1, range2):
@@ -545,15 +553,13 @@ class BaseReader(object):
     Abstract file reader class
     """
 
-    __slots__ = ('_sicd_meta', '_chipper', '_data_size', '_reader_type')
+    __slots__ = ('_chipper', '_data_size', '_reader_type')
 
-    def __init__(self, sicd_meta, chipper, reader_type="OTHER"):
+    def __init__(self, chipper, reader_type="OTHER"):
         """
 
         Parameters
         ----------
-        sicd_meta : None|SICDType|Tuple[SICDType]
-            `None`, the SICD metadata object, or tuple of objects
         chipper : BaseChipper|Tuple[BaseChipper]
             a chipper object, or tuple of chipper objects
         reader_type : str
@@ -568,24 +574,9 @@ class BaseReader(object):
                 'reader_type has value {}, while it is expected to be '
                 'one of {}'.format(reader_type, READER_TYPES))
         self._reader_type = reader_type
-        # adjust sicd_meta and chipper inputs
-        if isinstance(sicd_meta, list):
-            sicd_meta = tuple(sicd_meta)
+        # adjust chipper inputs
         if isinstance(chipper, list):
             chipper = tuple(chipper)
-
-        # validate sicd_meta input
-        if sicd_meta is None:
-            pass
-        elif isinstance(sicd_meta, tuple):
-            for el in sicd_meta:
-                if not isinstance(el, SICDType):
-                    raise TypeError(
-                        'Got a collection for sicd_meta, and all elements are required '
-                        'to be instances of SICDType.')
-        elif not isinstance(sicd_meta, SICDType):
-            raise TypeError('sicd_meta argument is required to be a SICDType, or collection of SICDType objects')
-        self._sicd_meta = sicd_meta
 
         # validate chipper input
         if isinstance(chipper, tuple):
@@ -614,14 +605,6 @@ class BaseReader(object):
         return self._reader_type
 
     @property
-    def sicd_meta(self):
-        """
-        None|SICDType|Tuple[SICDType]: the sicd meta_data or meta_data collection.
-        """
-
-        return self._sicd_meta
-
-    @property
     def data_size(self):
         # type: () -> Union[Tuple[int, int], Tuple[Tuple[int, int]]]
         """
@@ -638,22 +621,6 @@ class BaseReader(object):
         """
 
         raise NotImplementedError
-
-    def get_sicds_as_tuple(self):
-        """
-        Get the sicd or sicd collection as a tuple - for simplicity and consistency of use.
-
-        Returns
-        -------
-        Tuple[SICDType]
-        """
-
-        if self._sicd_meta is None:
-            return None
-        elif isinstance(self._sicd_meta, tuple):
-            return self._sicd_meta
-        else:
-            return (self._sicd_meta, )
 
     def get_data_size_as_tuple(self):
         """
@@ -682,78 +649,6 @@ class BaseReader(object):
             return self._chipper
         else:
             return (self._chipper, )
-
-    def get_sicd_partitions(self, match_function=is_general_match):
-        """
-        Partition the sicd collection into sub-collections according to `match_function`,
-        which is assumed to establish an equivalence relation (reflexive, symmetric, and transitive).
-
-        Parameters
-        ----------
-        match_function : callable
-            This match function must have call signature `(SICDType, SICDType) -> bool`, and
-            defaults to :func:`sarpy.io.complex.sicd_elements.utils.is_general_match`.
-            This function is assumed reflexive, symmetric, and transitive.
-
-        Returns
-        -------
-        Tuple[Tuple[int]]
-        """
-
-        if self.reader_type != "SICD":
-            logging.warning('It is only valid to get sicd partitions for a sicd type reader.')
-            return None
-
-        sicds = self.get_sicds_as_tuple()
-        # set up or state workspace
-        count = len(sicds)
-        matched = numpy.zeros((count,), dtype='bool')
-        matches = []
-
-        # assemble or match collections
-        for i in range(count):
-            if matched[i]:
-                # it's already matched somewhere
-                continue
-
-            matched[i] = True  # shouldn't access backwards, but just to be thorough
-            this_match = [i, ]
-            for j in range(i + 1, count):
-                if not matched[j] and match_function(sicds[i], sicds[j]):
-                    matched[j] = True
-                    this_match.append(j)
-            matches.append(tuple(this_match))
-        return tuple(matches)
-
-    def get_sicd_bands(self):
-        """
-        Gets the list of bands for each sicd.
-
-        Returns
-        -------
-        Tuple[str]
-        """
-
-        if self.reader_type != "SICD":
-            logging.warning('It is only valid to get sicd bands for a sicd type reader.')
-            return None
-
-        return tuple(sicd.get_transmit_band_name() for sicd in self.get_sicds_as_tuple())
-
-    def get_sicd_polarizations(self):
-        """
-        Gets the list of polarizations for each sicd.
-
-        Returns
-        -------
-        Tuple[str]
-        """
-
-        if self.reader_type != "SICD":
-            logging.warning('It is only valid to get sicd polarizations for a sicd type reader.')
-            return None
-
-        return tuple(sicd.get_processed_polarization() for sicd in self.get_sicds_as_tuple())
 
     def _validate_index(self, index):
         if isinstance(self._chipper, BaseChipper) or index is None:
@@ -931,13 +826,12 @@ class SubsetReader(BaseReader):
 
     __slots__ = ('_parent_reader', )
 
-    def __init__(self, parent_reader, sicd_meta, dim1bounds, dim2bounds):
+    def __init__(self, parent_reader, dim1bounds, dim2bounds):
         """
 
         Parameters
         ----------
         parent_reader : BaseReader
-        sicd_meta : SICDType
         dim1bounds : tuple
         dim2bounds : tuple
         """
@@ -945,7 +839,7 @@ class SubsetReader(BaseReader):
         self._parent_reader = parent_reader
         # noinspection PyProtectedMember
         chipper = SubsetChipper(parent_reader._chipper, dim1bounds, dim2bounds)
-        super(SubsetReader, self).__init__(sicd_meta, chipper)
+        super(SubsetReader, self).__init__(chipper, reader_type=parent_reader.reader_type)
 
     @property
     def file_name(self):
@@ -973,7 +867,7 @@ class AggregateReader(BaseReader):
         self._index_mapping = None
         self._readers = self._validate_readers(readers)
         the_chippers = self._define_index_mapping()
-        super(AggregateReader, self).__init__(sicd_meta=None, chipper=the_chippers, reader_type=reader_type)
+        super(AggregateReader, self).__init__(chipper=the_chippers, reader_type=reader_type)
 
     @staticmethod
     def _validate_readers(readers):
@@ -1013,7 +907,7 @@ class AggregateReader(BaseReader):
 
         # prepare the index mapping workspace
         index_mapping = []
-        # assemble the sicd_meta and chipper arguments
+        # assemble the chipper arguments
         the_chippers = []
         for i, reader in enumerate(self._readers):
             for j, chipper in enumerate(reader._get_chippers_as_tuple()):
@@ -1040,6 +934,65 @@ class AggregateReader(BaseReader):
         """
 
         return tuple(entry.file_name for entry in self._readers)
+
+
+class FlatReader(BaseReader):
+    """
+    Class for passing a numpy array or memmap straight through as a reader.
+    """
+
+    def __init__(self, array, reader_type='OTHER', output_bands=None, output_dtype=None,
+                 symmetry=(False, False, False), transform_data=None, limit_to_raw_bands=None):
+        """
+
+        Parameters
+        ----------
+        array : numpy.ndarray
+        reader_type : str
+            What kind of reader is this? Should be "SICD", or "OTHER" here. If SICD,
+            the (output) data is expected to be complex.
+        output_bands : None|int
+        output_dtype : None|str|numpy.dtype|numpy.number
+        symmetry : tuple
+            Describes any required data transformation. See the `symmetry` property.
+        transform_data : None|str|Callable
+            For data transformation after reading.
+            If `None`, then no transformation will be applied. If `callable`, then
+            this is expected to be the transformation method for the raw data. If
+            string valued and `'complex'`, then the assumption is that real/imaginary
+            components are stored in adjacent bands, which will be combined into a
+            single band upon extraction. Other situations will yield and value error.
+        limit_to_raw_bands : None|int|numpy.ndarray|list|tuple
+            The collection of raw bands to which to read. `None` is all bands.
+        """
+
+        if array.ndim not in [2, 3]:
+            raise ValueError('Requires two or three-dimensional array')
+
+        raw_dtype = array.dtype
+        raw_bands = 1 if array.ndim == 2 else array.shape[3]
+        data_size = array.shape[:2]
+
+        if output_bands is None:
+            if transform_data is not None or limit_to_raw_bands is not None:
+                raise ValueError(
+                    'output_bands is not populated, but transform_data or limit_to_raw_bands is populated.')
+            output_bands = raw_bands
+
+        if output_dtype is None:
+            if transform_data is not None:
+                raise ValueError(
+                    'output_dtype is not populated, but transform_data is populated.')
+            output_dtype = raw_dtype
+
+        chipper = BIPChipper(
+            array, raw_dtype, data_size, raw_bands, output_bands, output_dtype,
+            symmetry=symmetry, transform_data=transform_data, limit_to_raw_bands=limit_to_raw_bands)
+        super(FlatReader, self).__init__(chipper, reader_type=reader_type)
+
+    @property
+    def file_name(self):
+        return None
 
 
 #################
@@ -1129,82 +1082,25 @@ class AbstractWriter(object):
             # It's unclear how any exception could be caught.
 
 
-def validate_sicd_for_writing(sicd_meta):
-    """
-    Helper method which ensures the provided SICD structure provides enough
-    information to support file writing, as well as ensures a few basic items
-    are populated as appropriate.
-
-    Parameters
-    ----------
-    sicd_meta : SICDType
-
-    Returns
-    -------
-    SICDType
-        This returns a deep copy of the provided SICD structure, with any
-        necessary modifications.
-    """
-
-    if not isinstance(sicd_meta, SICDType):
-        raise ValueError('sicd_meta is required to be an instance of SICDType, got {}'.format(type(sicd_meta)))
-    if sicd_meta.ImageData is None:
-        raise ValueError('The sicd_meta has un-populated ImageData, and nothing useful can be inferred.')
-    if sicd_meta.ImageData.NumCols is None or sicd_meta.ImageData.NumRows is None:
-        raise ValueError('The sicd_meta has ImageData with unpopulated NumRows or NumCols, '
-                         'and nothing useful can be inferred.')
-    if sicd_meta.ImageData.PixelType is None:
-        logging.warning('The PixelType for sicd_meta is unset, so defaulting to RE32F_IM32F.')
-        sicd_meta.ImageData.PixelType = 'RE32F_IM32F'
-
-    sicd_meta = sicd_meta.copy()
-
-    profile = '{} {}'.format(__title__, __version__)
-    if sicd_meta.ImageCreation is None:
-        sicd_meta.ImageCreation = ImageCreationType(
-            Application=profile,
-            DateTime=numpy.datetime64(datetime.now()),
-            Profile=profile)
-    else:
-        sicd_meta.ImageCreation.Profile = profile
-        if sicd_meta.ImageCreation.DateTime is None:
-            sicd_meta.ImageCreation.DateTime = numpy.datetime64(datetime.now())
-    return sicd_meta
-
-
-class BaseWriter(AbstractWriter):
-    """
-    Abstract file writer class for SICD data
-    """
-
-    __slots__ = ('_file_name', '_sicd_meta', )
-
-    def __init__(self, file_name, sicd_meta):
-        """
-
-        Parameters
-        ----------
-        file_name : str
-        sicd_meta : SICDType
-        """
-
-        super(BaseWriter, self).__init__(file_name)
-        self._sicd_meta = validate_sicd_for_writing(sicd_meta)
-
-    @property
-    def sicd_meta(self):
-        """
-        SICDType: the sicd metadata
-        """
-
-        return self._sicd_meta
-
-    def __call__(self, data, start_indices=(0, 0)):
-        raise NotImplementedError
-
-
 #############
-# concrete band-interleaved by pixel (BIP) format implementations
+# concrete chipper implementations for NITF file patterns
+
+def _validate_limit_to_raw_bands(limit_to_raw_bands, raw_bands):
+    if limit_to_raw_bands is None:
+        return None
+
+    if isinstance(limit_to_raw_bands, integer_types):
+        limit_to_raw_bands = numpy.array([limit_to_raw_bands, ], dtype='int32')
+    if isinstance(limit_to_raw_bands, (list, tuple)):
+        limit_to_raw_bands = numpy.array(limit_to_raw_bands, dtype='int32')
+    if not isinstance(limit_to_raw_bands, numpy.ndarray):
+        raise TypeError('limit_to_raw_bands got unsupported input of type {}'.format(type(limit_to_raw_bands)))
+    # ensure that limit_to_raw_bands make sense...
+    if numpy.any((limit_to_raw_bands < 0) | (limit_to_raw_bands >= raw_bands)):
+        raise ValueError(
+            'all entries of limit_to_raw_bands ({}) must be in the range 0 <= value < {}'.format(limit_to_raw_bands, raw_bands))
+    return limit_to_raw_bands
+
 
 class BIPChipper(BaseChipper):
     """
@@ -1212,18 +1108,20 @@ class BIPChipper(BaseChipper):
     """
 
     __slots__ = (
-        '_file_name', '_raw_dtype', '_data_offset', '_shape', '_raw_bands',
-        '_output_bands', '_output_dtype', '_limit_to_raw_bands', '_memory_map', '_fid')
+        '_file_name', '_file_object', '_data_offset', '_shape',
+        '_raw_bands', '_raw_dtype', '_output_bands', '_output_dtype',
+        '_limit_to_raw_bands', '_memory_map', '_close_after')
 
-    def __init__(self, file_name, raw_dtype, data_size, raw_bands, output_bands, output_dtype,
+    def __init__(self, data_input, raw_dtype, data_size, raw_bands, output_bands, output_dtype,
                  symmetry=(False, False, False), transform_data=None,
                  data_offset=0, limit_to_raw_bands=None):
         """
 
         Parameters
         ----------
-        file_name : str
-            The name of the file from which to read
+        data_input : str|BinaryIO|numpy.ndarray
+            The name of a file or binary file like object from which to read,
+            or a numpy array or memmap to use directly.
         raw_dtype : str|numpy.dtype|numpy.number
             The data type of the underlying file. **Note: specify endianness where necessary.**
         data_size : tuple
@@ -1250,13 +1148,16 @@ class BIPChipper(BaseChipper):
         """
 
         self._limit_to_raw_bands = None
+        self._file_name = None #type: Union[None, str]
+        self._file_object = None  # type: Union[None, BinaryIO]
+        self._memory_map = None  # type: Union[None, numpy.ndarray]
+        self._close_after = False  # type: bool
         super(BIPChipper, self).__init__(data_size, symmetry=symmetry, transform_data=transform_data)
 
         raw_bands = int_func(raw_bands)
         if raw_bands < 1:
             raise ValueError('raw_bands must be a positive integer')
         self._raw_bands = raw_bands
-        self._validate_limit_to_raw_bands(limit_to_raw_bands)
 
         output_bands = int_func(output_bands)
         if output_bands < 1:
@@ -1273,61 +1174,77 @@ class BIPChipper(BaseChipper):
 
         self._shape = (int_func(data_size[0]), int_func(data_size[1]), self._raw_bands)
 
-        if not os.path.isfile(file_name):
-            raise IOError('Path {} either does not exists, or is not a file.'.format(file_name))
-        if not os.access(file_name, os.R_OK):
-            raise IOError('User does not appear to have read access for file {}.'.format(file_name))
-        self._file_name = file_name
+        if isinstance(data_input, numpy.ndarray):
+            self._memory_map = data_input
+            self._file_name = None
+            self._file_object = None
+            # NB: we assume the the rest of the data is set up properly
+        elif is_file_like(data_input):
+            self._file_object = data_input
+            self._close_after = False
+            self._file_name = data_input.name if hasattr(data_input, 'name') else None
 
-        self._memory_map = None
-        self._fid = None
-        try:
-            self._memory_map = numpy.memmap(self._file_name,
-                                            dtype=raw_dtype,
-                                            mode='r',
-                                            offset=data_offset,
-                                            shape=self._shape)  # type: numpy.memmap
-        except (OverflowError, OSError):
-            if self._limit_to_raw_bands is not None:
-                raise ValueError(
-                    'Unsupported effort with limit_to_raw_bands is not None, and falling '
-                    'back to a manual file reading. This is presumably because this is '
-                    '32-bit python and you are reading a large (> 2GB) file.')
-            # if 32-bit python, then we'll fail for any file larger than 2GB
-            # we fall-back to a slower version of reading manually
-            self._fid = open(self._file_name, mode='rb')
-            logging.warning(
-                'Falling back to reading file {} manually (instead of using mem-map). This has almost '
-                'certainly occurred because you are 32-bit python to try to read (portions of) a file '
-                'which is larger than 2GB.'.format(self._file_name))
+            if hasattr(data_input, 'fileno'):
+                # noinspection PyBroadException
+                try:
+                    self._memory_map = numpy.memmap(data_input,
+                                                    dtype=raw_dtype,
+                                                    mode='r',
+                                                    offset=data_offset,
+                                                    shape=self._shape)
+                except Exception as e:
+                    # fall back to direct reading
+                    logging.error(
+                        'Error setting up a BIP chipper - {}\n'
+                        'This may actually be fatal.'.format(e))
+                    self._memory_map = None
+            else:
+                self._memory_map = None
+        elif isinstance(data_input, str):
+            if not os.path.isfile(data_input):
+                raise SarpyIOError('Path {} either does not exists, or is not a file.'.format(data_input))
+            if not os.access(data_input, os.R_OK):
+                raise SarpyIOError('User does not appear to have read access for file {}.'.format(data_input))
+            self._file_name = data_input
+            try:
+                self._memory_map = numpy.memmap(self._file_name,
+                                                dtype=raw_dtype,
+                                                mode='r',
+                                                offset=data_offset,
+                                                shape=self._shape)
+                self._file_object = None
+                self._close_after = False
+            except (OverflowError, OSError):
+                # fallback after failing to construct the mem map
+                #   the most likely cause to be here is that 32-bit python fails
+                #   constructing a memmap for any file larger than 2GB
+                self._file_object = open(self._file_name, mode='rb')
+                self._close_after = True
+                logging.warning(
+                    'Falling back to reading file {} manually, instead of using '
+                    'numpy memmap.'.format(self._file_name))
+        self._validate_limit_to_raw_bands(limit_to_raw_bands)
 
     def _validate_limit_to_raw_bands(self, limit_to_raw_bands):
-        if limit_to_raw_bands is None:
-            self._limit_to_raw_bands = None
-            return
-
-        if isinstance(limit_to_raw_bands, integer_types):
-            limit_to_raw_bands = numpy.array([limit_to_raw_bands, ], dtype='int32')
-        if isinstance(limit_to_raw_bands, (list, tuple)):
-            limit_to_raw_bands = numpy.array(limit_to_raw_bands, dtype='int32')
-        if not isinstance(limit_to_raw_bands, numpy.ndarray):
-            raise TypeError('limit_to_raw_bands got unsupported input of type {}'.format(type(limit_to_raw_bands)))
-        # ensure that limit_to_raw_bands make sense...
-        if numpy.any((limit_to_raw_bands < 0) | (limit_to_raw_bands >= self._raw_bands)):
+        limit_to_raw_bands = _validate_limit_to_raw_bands(limit_to_raw_bands, self._raw_bands)
+        if self._memory_map is None and limit_to_raw_bands is not None:
             raise ValueError(
-                'all entries of limit_to_raw_bands ({}) must be in the range 0 <= value < {}'.format(limit_to_raw_bands, self._raw_bands))
+                'BIP chipper cannot utilize limit_to_raw_bands except when using a local file.')
         self._limit_to_raw_bands = limit_to_raw_bands
 
     def __del__(self):
-        if hasattr(self, '_fid') and self._fid is not None and \
-                hasattr(self._fid, 'closed') and not self._fid.closed:
-            self._fid.close()
+        if not self._close_after:
+            return
+        if self._file_object is not None and \
+                hasattr(self._file_object, 'closed') and \
+                not self._file_object.closed:
+            self._file_object.close()
 
     def _read_raw_fun(self, range1, range2):
         t_range1, t_range2 = self._reorder_arguments(range1, range2)
         if self._memory_map is not None:
             return self._read_memory_map(t_range1, t_range2)
-        elif self._fid is not None:
+        else:
             return self._read_file(t_range1, t_range2)
 
     def _read_memory_map(self, range1, range2):
@@ -1370,33 +1287,337 @@ class BIPChipper(BaseChipper):
         return out
 
     def _read_file(self, range1, range2):
-        def get_row_location(rr, cc):
-            return self._data_offset + \
-                   rr*stride + \
-                   cc*element_size
+        if self._limit_to_raw_bands is None:
+            band_collection = numpy.arange(self._raw_bands, dtype='int32')
+        else:
+            band_collection = self._limit_to_raw_bands
 
+        init_location = self._file_object.tell()
         # we have to manually map out the stride and all that for the array ourselves
         element_size = int_func(numpy.dtype(self._raw_dtype).itemsize*self._raw_bands)
-        stride = element_size*int_func(self._shape[0])  # how much to skip a whole (real) row?
-        entries_per_row = abs(range1[1] - range1[0])  # not including the stride, if not +/-1
+        stride = element_size*int_func(self._shape[1])  # how much to skip a whole (real) row?
         # let's determine the specific row/column arrays that we are going to read
-        dim1array = numpy.arange(range1)
-        dim2array = numpy.arange(range2)
+        dim1array = numpy.arange(*range1)
+        dim2array = numpy.arange(*range2)
+        # determine the contiguous chunk to read
+        start_row = min(dim1array[0], dim1array[-1])
+        rows = abs(range1[1] - range1[0])
         # allocate our output array
-        out = numpy.empty((len(dim1array), len(dim2array), self._raw_bands), dtype=self._raw_dtype)
-        # determine the first column reading location (may be reading cols backwards)
-        col_begin = dim2array[0] if range2[2] > 0 else dim2array[-1]
+        out = numpy.empty((len(dim1array), len(dim2array), len(band_collection)), dtype=self._raw_dtype)
 
-        for i, row in enumerate(dim1array):
-            # go to the appropriate point in the file for (row/col)
-            self._fid.seek(get_row_location(row, col_begin))
-            # interpret this of line as numpy.ndarray - inherently flat array
-            line = numpy.fromfile(self._fid, self._raw_dtype, entries_per_row*self._raw_bands)
-            # note that we purposely read without considering skipping elements, which
-            #   is factored in (along with any potential order reversal) below
-            out[i, :, :] = line[::range2[2]]
+        # seek to the proper start location
+        start_loc = self._data_offset + start_row*stride
+        self._file_object.seek(start_loc, os.SEEK_SET)
+        # read our data
+        total_entries = int_func(rows)*self._shape[1]*self._raw_bands
+        total_size = int_func(rows)*stride
+        data = self._file_object.read(total_size)
+        if len(data) != total_size:
+            raise ValueError(
+                'Tried to read {} bytes of data, but received {}.\n'
+                'The most likely reason for this is a malformed chipper, \n'
+                'which attempts to read more data than the file contains'.format(total_size, len(data)))
+        # cast and shape
+        data = numpy.frombuffer(data, self._raw_dtype, total_entries)
+        data = numpy.reshape(data, (rows, self._shape[1], self._raw_bands))
+        # reduce, as necessary
+        out[:, :] = data[range1[0]-start_row:range1[1]-start_row:range1[2], range2[0]:range2[1]:range2[2], band_collection]
+        self._file_object.seek(init_location, os.SEEK_SET)
         return out
 
+
+class BSQChipper(BaseChipper):
+    """
+    Chipper enabling Band-sequential and Band Interleaved by Block formats,
+    assembled from single band BIP constituents
+    """
+
+    __slots__ = ('_child_chippers', '_dtype', '_limit_to_raw_bands')
+
+    def __init__(self, child_chippers, output_dtype, transform_data=None, limit_to_raw_bands=None):
+        """
+
+        Parameters
+        ----------
+        child_chippers : tuple|list
+            The list or tuple of child chipper objects.
+        output_dtype : str|numpy.dtype|numpy.number
+            The data type of the output data
+        transform_data : None|str|Callable
+            For data transformation after reading.
+            If `None`, then no transformation will be applied. If `callable`, then
+            this is expected to be the transformation method for the raw data. If
+            string valued and `'complex'`, then the assumption is that real/imaginary
+            components are stored in adjacent bands, which will be combined into a
+            single band upon extraction. Other situations will yield and value error.
+        limit_to_raw_bands : None|int|numpy.ndarray|list|tuple
+            The collection of raw bands to which to read. `None` is all bands.
+        """
+
+        self._dtype = output_dtype
+        self._limit_to_raw_bands = None
+        # validate that the data_sizes are all the same
+        data_size = None
+        for i, entry in enumerate(child_chippers):
+            if not isinstance(entry, BaseChipper):
+                raise TypeError(
+                    'Each entry of child_chippers must be an instance of BaseChipper, '
+                    'got type {} at entry {}'.format(type(entry), i))
+            if data_size is None:
+                data_size = entry.data_size
+            elif entry.data_size != data_size:
+                raise ValueError(
+                    'chipper at index {} has expected shape {}, but '
+                    'actual shape {}'.format(i, data_size, entry.data_size))
+        self._child_chippers = child_chippers
+        # NB: it is left to the constructor to know that these all fit otherwise
+        super(BSQChipper, self).__init__(data_size, symmetry=(False, False, False), transform_data=transform_data)
+        self._validate_limit_to_raw_bands(limit_to_raw_bands)
+
+    @property
+    def output_bands(self):
+        """
+        int: The number of bands.
+        """
+
+        return len(self._child_chippers)
+
+    def _validate_limit_to_raw_bands(self, limit_to_raw_bands):
+        self._limit_to_raw_bands = _validate_limit_to_raw_bands(limit_to_raw_bands, self.output_bands)
+
+    def _read_raw_fun(self, range1, range2):
+        range1, range2 = self._reorder_arguments(range1, range2)
+        rows_size = int_func(numpy.ceil((range1[1]-range1[0])/range1[2]))
+        cols_size = int_func(numpy.ceil((range2[1]-range2[0])/range2[2]))
+
+        if self._limit_to_raw_bands is None:
+            out = numpy.zeros((rows_size, cols_size, self.output_bands), dtype=self._dtype)
+            for band_number, child_chipper in enumerate(self._child_chippers):
+                out[:rows_size, :cols_size, band_number] = \
+                    child_chipper[range1[0]:range1[1]:range1[2], range2[0]:range2[1]:range2[2]]
+        else:
+            out = numpy.zeros((rows_size, cols_size, self._limit_to_raw_bands.size), dtype=self._dtype)
+            for i, band_number in enumerate(self._limit_to_raw_bands):
+                child_chipper = self._child_chippers[int(band_number)]
+                out[:rows_size, :cols_size, i] = \
+                    child_chipper[range1[0]:range1[1]:range1[2], range2[0]:range2[1]:range2[2]]
+        return out
+
+
+class BIRChipper(BaseChipper):
+    """
+    Band Interleaved by Row chipper.
+    """
+
+    __slots__ = (
+        '_file_name', '_file_object', '_data_offset', '_shape',
+        '_raw_bands', '_raw_dtype', '_output_bands', '_output_dtype',
+        '_limit_to_raw_bands', '_memory_map', '_close_after')
+
+    def __init__(self, data_input, raw_dtype, data_size, raw_bands, output_bands, output_dtype,
+                 symmetry=(False, False, False), transform_data=None,
+                 data_offset=0, limit_to_raw_bands=None):
+        """
+
+        Parameters
+        ----------
+        data_input : str|BinaryIO|numpy.ndarray
+            The name of a file or binary file like object from which to read,
+            or a numpy array or memmap to use directly.
+        raw_dtype : str|numpy.dtype|numpy.number
+            The data type of the underlying file. **Note: specify endianness where necessary.**
+        data_size : tuple
+            The `(rows, columns)` of the raw data. See `data_size` property.
+        raw_bands : int
+            The number of bands in the file.
+        output_bands : int
+            The number of bands in the output data.
+        output_dtype : str|numpy.dtype|numpy.number
+            The data type of the return data. This should be in keeping with `transform_data`.
+        symmetry : tuple
+            Describes any required data transformation. See the `symmetry` property.
+        transform_data : None|str|Callable
+            For data transformation after reading.
+            If `None`, then no transformation will be applied. If `callable`, then
+            this is expected to be the transformation method for the raw data. If
+            string valued and `'complex'`, then the assumption is that real/imaginary
+            components are stored in adjacent bands, which will be combined into a
+            single band upon extraction. Other situations will yield and value error.
+        data_offset : int
+            byte offset from the start of the file at which the data actually starts
+        limit_to_raw_bands : None|int|numpy.ndarray|list|tuple
+            The collection of raw bands to which to read. `None` is all bands.
+        """
+
+        self._limit_to_raw_bands = None
+        self._file_name = None #type: Union[None, str]
+        self._file_object = None  # type: Union[None, BinaryIO]
+        self._memory_map = None  # type: Union[None, numpy.ndarray]
+        self._close_after = False  # type: bool
+        super(BIRChipper, self).__init__(data_size, symmetry=symmetry, transform_data=transform_data)
+
+        raw_bands = int_func(raw_bands)
+        if raw_bands < 1:
+            raise ValueError('raw_bands must be a positive integer')
+        self._raw_bands = raw_bands
+
+        output_bands = int_func(output_bands)
+        if output_bands < 1:
+            raise ValueError('output_bands must be a positive integer.')
+        self._output_bands = output_bands
+
+        self._raw_dtype = raw_dtype
+        self._output_dtype = output_dtype
+
+        data_offset = int_func(data_offset)
+        if data_offset < 0:
+            raise ValueError('data_offset must be a non-negative integer. Got {}'.format(data_offset))
+        self._data_offset = int_func(data_offset)
+
+        self._shape = (int_func(data_size[0]), self._raw_bands, int_func(data_size[1]))
+
+        if isinstance(data_input, numpy.ndarray):
+            self._memory_map = data_input
+            self._file_name = None
+            self._file_object = None
+            # NB: we assume the the rest of the data is set up properly
+        elif is_file_like(data_input):
+            self._file_object = data_input
+            self._close_after = False
+            self._file_name = data_input.name if hasattr(data_input, 'name') else None
+
+            if hasattr(data_input, 'fileno'):
+                # noinspection PyBroadException
+                try:
+                    self._memory_map = numpy.memmap(data_input,
+                                                    dtype=raw_dtype,
+                                                    mode='r',
+                                                    offset=data_offset,
+                                                    shape=self._shape)
+                except Exception:
+                    # fall back to direct reading
+                    self._memory_map = None
+            else:
+                self._memory_map = None
+        elif isinstance(data_input, str):
+            if not os.path.isfile(data_input):
+                raise SarpyIOError('Path {} either does not exists, or is not a file.'.format(data_input))
+            if not os.access(data_input, os.R_OK):
+                raise SarpyIOError('User does not appear to have read access for file {}.'.format(data_input))
+            self._file_name = data_input
+            try:
+                self._memory_map = numpy.memmap(self._file_name,
+                                                dtype=raw_dtype,
+                                                mode='r',
+                                                offset=data_offset,
+                                                shape=self._shape)
+                self._file_object = None
+                self._close_after = False
+            except (OverflowError, OSError):
+                # fallback after failing to construct the mem map
+                #   the most likely cause to be here is that 32-bit python fails
+                #   constructing a memmap for any file larger than 2GB
+                self._file_object = open(self._file_name, mode='rb')
+                self._close_after = True
+                logging.warning(
+                    'Falling back to reading file {} manually, instead of using '
+                    'numpy memmap.'.format(self._file_name))
+        self._validate_limit_to_raw_bands(limit_to_raw_bands)
+
+    def _validate_limit_to_raw_bands(self, limit_to_raw_bands):
+        limit_to_raw_bands = _validate_limit_to_raw_bands(limit_to_raw_bands, self._raw_bands)
+        self._limit_to_raw_bands = limit_to_raw_bands
+
+    def __del__(self):
+        if not self._close_after:
+            return
+        if self._file_object is not None and \
+                hasattr(self._file_object, 'closed') and \
+                not self._file_object.closed:
+            self._file_object.close()
+
+    def _read_raw_fun(self, range1, range2):
+        t_range1, t_range2 = self._reorder_arguments(range1, range2)
+        if self._memory_map is not None:
+            out = self._read_memory_map(t_range1, t_range2)
+        else:
+            out = self._read_file(t_range1, t_range2)
+        return numpy.copy(numpy.transpose(out, (0, 2, 1)))
+
+    def _read_memory_map(self, range1, range2):
+        if (range1[1] == -1 and range1[2] < 0) and (range2[1] == -1 and range2[2] < 0):
+            if self._limit_to_raw_bands is None:
+                out = numpy.array(
+                    self._memory_map[range1[0]::range1[2], :, range2[0]::range2[2]],
+                    dtype=self._raw_dtype)
+            else:
+                out = numpy.array(
+                    self._memory_map[range1[0]::range1[2], self._limit_to_raw_bands, range2[0]::range2[2]],
+                    dtype=self._raw_dtype)
+        elif range1[1] == -1 and range1[2] < 0:
+            if self._limit_to_raw_bands is None:
+                out = numpy.array(
+                    self._memory_map[range1[0]::range1[2], :, range2[0]:range2[1]:range2[2]],
+                    dtype=self._raw_dtype)
+            else:
+                out = numpy.array(
+                    self._memory_map[range1[0]::range1[2], self._limit_to_raw_bands, range2[0]:range2[1]:range2[2]],
+                    dtype=self._raw_dtype)
+        elif range2[1] == -1 and range2[2] < 0:
+            if self._limit_to_raw_bands is None:
+                out = numpy.array(
+                    self._memory_map[range1[0]:range1[1]:range1[2], :, range2[0]::range2[2]],
+                    dtype=self._raw_dtype)
+            else:
+                out = numpy.array(
+                    self._memory_map[range1[0]:range1[1]:range1[2], self._limit_to_raw_bands, range2[0]::range2[2]],
+                    dtype=self._raw_dtype)
+        else:
+            if self._limit_to_raw_bands is None:
+                out = numpy.array(
+                    self._memory_map[range1[0]:range1[1]:range1[2], :, range2[0]:range2[1]:range2[2]],
+                    dtype=self._raw_dtype)
+            else:
+                out = numpy.array(
+                    self._memory_map[range1[0]:range1[1]:range1[2], self._limit_to_raw_bands, range2[0]:range2[1]:range2[2]],
+                    dtype=self._raw_dtype)
+        return out
+
+    def _read_file(self, range1, range2):
+        if self._limit_to_raw_bands is None:
+            band_collection = numpy.arange(self._raw_bands, dtype='int32')
+        else:
+            band_collection = self._limit_to_raw_bands
+
+        init_location = self._file_object.tell()
+        # we have to manually map out the stride and all that for the array ourselves
+        element_size = int_func(numpy.dtype(self._raw_dtype).itemsize)
+        stride = element_size*int_func(self._shape[2])*self._raw_bands  # how much to skip a whole (real) row?
+        # let's determine the specific row/column arrays that we are going to read
+        dim1array = numpy.arange(*range1)
+        dim2array = numpy.arange(*range2)
+        # determine the contiguous chunk to read
+        start_row = min(dim1array[0], dim1array[-1])
+        rows = abs(range1[1] - range1[0])
+        # allocate our output array
+        out = numpy.empty((len(dim1array), len(band_collection), len(dim2array)), dtype=self._raw_dtype)
+
+        # seek to the proper start location
+        start_loc = self._data_offset + start_row*stride
+        self._file_object.seek(start_loc, os.SEEK_SET)
+        # read our data, then cast and reduce
+        total_entries = int_func(rows)*self._shape[2]*self._raw_bands
+        total_size = self._shape[2]*stride
+        data = self._file_object.read(total_size)
+        data = numpy.frombuffer(data, self._raw_dtype, total_entries)
+        data = numpy.reshape(data, (rows, self._raw_bands, self._shape[2]))
+        out[:, :, :] = data[range1[0]-start_row:range1[1]-start_row:range1[2], band_collection, range2[0]:range2[1]:range2[2]]
+        self._file_object.seek(init_location, os.SEEK_SET)
+        return out
+
+
+############
+# concrete writing chipper
 
 class BIPWriter(AbstractWriter):
     """
@@ -1559,7 +1780,7 @@ class BIPWriter(AbstractWriter):
             element_size *= int_func(self._shape[2])
         stride = element_size*int_func(self._shape[0])
         # go to the appropriate spot in the file for first entry
-        self._fid.seek(self._data_offset + stride*start1 + element_size*start2)
+        self._fid.seek(self._data_offset + stride*start1 + element_size*start2, os.SEEK_SET)
         if start1 == 0 and stop1 == self._shape[0]:
             # we can write the block all at once
             data.astype(self._raw_dtype).tofile(self._fid)
@@ -1602,97 +1823,3 @@ class BIPWriter(AbstractWriter):
                 'only partially generated and corrupt.'.format(self.__class__.__name__, self._file_name))
             # The exception will be reraised.
             # It's unclear how any exception could be caught.
-
-
-#############
-# concrete band-sequential (BSQ) implementation
-
-class BSQChipper(BaseChipper):
-    """
-    Band-sequential chipper assembled from the (single band) BIP constituents.
-    """
-
-    __slots__ = ('_child_chippers', '_dtype', '_limit_to_raw_bands')
-
-    def __init__(self, child_chippers, output_dtype, transform_data=None, limit_to_raw_bands=None):
-        """
-
-        Parameters
-        ----------
-        child_chippers : tuple|list
-            The list or tuple of child chipper objects.
-        output_dtype : str|numpy.dtype|numpy.number
-            The data type of the output data
-        transform_data : None|str|Callable
-            For data transformation after reading.
-            If `None`, then no transformation will be applied. If `callable`, then
-            this is expected to be the transformation method for the raw data. If
-            string valued and `'complex'`, then the assumption is that real/imaginary
-            components are stored in adjacent bands, which will be combined into a
-            single band upon extraction. Other situations will yield and value error.
-        limit_to_raw_bands : None|int|numpy.ndarray|list|tuple
-            The collection of raw bands to which to read. `None` is all bands.
-        """
-
-        self._dtype = output_dtype
-        self._limit_to_raw_bands = None
-        # validate that the data_sizes are all the same
-        data_size = None
-        for i, entry in enumerate(child_chippers):
-            if not isinstance(entry, BaseChipper):
-                raise TypeError(
-                    'Each entry of child_chippers must be an instance of BaseChipper, '
-                    'got type {} at entry {}'.format(type(entry), i))
-            if data_size is None:
-                data_size = entry.data_size
-            elif entry.data_size != data_size:
-                raise ValueError(
-                    'chipper at index {} has expected shape {}, but '
-                    'actual shape {}'.format(i, data_size, entry.data_size))
-        self._child_chippers = child_chippers
-        # NB: it is left to the constructor to know that these all fit otherwise
-        super(BSQChipper, self).__init__(data_size, symmetry=(False, False, False), transform_data=transform_data)
-        self._validate_limit_to_raw_bands(limit_to_raw_bands)
-
-    @property
-    def output_bands(self):
-        """
-        int: The number of bands.
-        """
-
-        return len(self._child_chippers)
-
-    def _validate_limit_to_raw_bands(self, limit_to_raw_bands):
-        if limit_to_raw_bands is None:
-            self._limit_to_raw_bands = None
-            return
-
-        if isinstance(limit_to_raw_bands, integer_types):
-            limit_to_raw_bands = numpy.array([limit_to_raw_bands, ], dtype='int32')
-        if isinstance(limit_to_raw_bands, (list, tuple)):
-            limit_to_raw_bands = numpy.array(limit_to_raw_bands, dtype='int32')
-        if not isinstance(limit_to_raw_bands, numpy.ndarray):
-            raise TypeError('limit_to_raw_bands got unsupported input of type {}'.format(type(limit_to_raw_bands)))
-        # ensure that limit_to_raw_bands make sense...
-        if numpy.any((limit_to_raw_bands < 0) | (limit_to_raw_bands >= self.output_bands)):
-            raise ValueError(
-                'all entries of limit_to_raw_bands ({}) must be in the range 0 <= value < {}'.format(limit_to_raw_bands, self.output_bands))
-        self._limit_to_raw_bands = limit_to_raw_bands
-
-    def _read_raw_fun(self, range1, range2):
-        range1, range2 = self._reorder_arguments(range1, range2)
-        rows_size = int_func((range1[1]-range1[0])/range1[2])
-        cols_size = int_func((range2[1]-range2[0])/range2[2])
-
-        if self._limit_to_raw_bands is None:
-            out = numpy.zeros((rows_size, cols_size, self.output_bands), dtype=self._dtype)
-            for band_number, child_chipper in enumerate(self._child_chippers):
-                out[:rows_size, :cols_size, band_number] = \
-                    child_chipper[range1[0]:range1[1]:range1[2], range2[0]:range2[1]:range2[2]]
-        else:
-            out = numpy.zeros((rows_size, cols_size, self._limit_to_raw_bands.size), dtype=self._dtype)
-            for i, band_number in enumerate(self._limit_to_raw_bands):
-                child_chipper = self._child_chippers[int(band_number)]
-                out[:rows_size, :cols_size, i] = \
-                    child_chipper[range1[0]:range1[1]:range1[2], range2[0]:range2[1]:range2[2]]
-        return out
