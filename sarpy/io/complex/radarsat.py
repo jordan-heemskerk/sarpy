@@ -1,7 +1,10 @@
-# -*- coding: utf-8 -*-
 """
 Functionality for reading Radarsat (RS2 and RCM) data into a SICD model.
 """
+
+__classification__ = "UNCLASSIFIED"
+__author__ = ("Thomas McCullough", "Khanh Ho", "Wade Schwartzkopf", "Nathan Bombaci")
+
 
 import logging
 import re
@@ -16,12 +19,13 @@ from numpy.polynomial import polynomial
 from scipy.constants import speed_of_light
 
 from sarpy.compliance import string_types, int_func
-from sarpy.io.general.base import BaseReader
+from sarpy.io.general.base import BaseReader, SarpyIOError
 from sarpy.io.general.tiff import TiffDetails, TiffReader
-from sarpy.io.complex.other_nitf import ComplexNITFReader
-from sarpy.io.general.utils import get_seconds, parse_timestring
+from sarpy.io.general.utils import get_seconds, parse_timestring, is_file_like
 from sarpy.geometry.geocoords import geodetic_to_ecf
 
+from sarpy.io.complex.base import SICDTypeReader
+from sarpy.io.complex.other_nitf import ComplexNITFReader
 from sarpy.io.complex.sicd_elements.blocks import Poly1DType, Poly2DType
 from sarpy.io.complex.sicd_elements.SICD import SICDType
 from sarpy.io.complex.sicd_elements.CollectionInfo import CollectionInfoType, RadarModeType
@@ -38,10 +42,6 @@ from sarpy.io.complex.sicd_elements.RMA import RMAType, INCAType
 from sarpy.io.complex.sicd_elements.SCPCOA import SCPCOAType
 from sarpy.io.complex.sicd_elements.Radiometric import RadiometricType, NoiseLevelType_
 from sarpy.io.complex.utils import fit_time_coa_polynomial, fit_position_xvalidation
-
-
-__classification__ = "UNCLASSIFIED"
-__author__ = ("Thomas McCullough", "Khanh Ho", "Wade Schwartzkopf", "Nathan Bombaci")
 
 
 ########
@@ -62,11 +62,14 @@ def is_a(file_name):
         `RadarSatReader` instance if RadarSat file, `None` otherwise
     """
 
+    if is_file_like(file_name):
+        return None
+
     try:
         details = RadarSatDetails(file_name)
         logging.info('Path {} is determined to be or contain a RadarSat or RCM product.xml file.'.format(file_name))
         return RadarSatReader(details)
-    except IOError:
+    except SarpyIOError:
         return None
 
 
@@ -130,7 +133,7 @@ def _construct_tiff_chipper(the_sicd, the_file, symmetry):
     """
 
     tiff_details = TiffDetails(the_file)
-    reader = TiffReader(tiff_details, sicd_meta=the_sicd, symmetry=symmetry)
+    reader = TiffReader(tiff_details, symmetry=symmetry)
     # noinspection PyProtectedMember
     chipper = reader._chipper
     _validate_chipper_and_sicd(the_sicd, chipper, 'tiff', the_file)
@@ -230,9 +233,9 @@ class RadarSatDetails(object):
                     file_name = t_file_name
                     break
         if not os.path.isfile(file_name):
-            raise IOError('path {} does not exist or is not a file'.format(file_name))
+            raise SarpyIOError('path {} does not exist or is not a file'.format(file_name))
         if os.path.split(file_name)[1] != 'product.xml':
-            raise IOError('The radarsat or rcm file is expected to be named product.xml, got path {}'.format(file_name))
+            raise SarpyIOError('The radarsat or rcm file is expected to be named product.xml, got path {}'.format(file_name))
 
         self._file_name = file_name
         root_node = _parse_xml(file_name, without_ns=True)
@@ -243,7 +246,7 @@ class RadarSatDetails(object):
             './imageGenerationParameters/generalProcessingInformation/productType')
         product_type = 'None' if product_node is None else product_node.text.upper()
         if not ((satellite == 'RADARSAT-2' or satellite.startswith('RCM')) and product_type == 'SLC'):
-            raise IOError('File {} does not appear to be an SLC product for a RADARSAT-2 '
+            raise SarpyIOError('File {} does not appear to be an SLC product for a RADARSAT-2 '
                           'or RCM mission.'.format(file_name))
 
         self._root_node = root_node
@@ -1530,7 +1533,7 @@ class RadarSatDetails(object):
 ##############
 # reader implementation - really just borrows from tiff or NITF reader
 
-class RadarSatReader(BaseReader):
+class RadarSatReader(BaseReader, SICDTypeReader):
     """
     The reader object for RadarSat SAR file package.
     """
@@ -1543,7 +1546,7 @@ class RadarSatReader(BaseReader):
         Parameters
         ----------
         radar_sat_details : str|RadarSatDetails
-            file name or RadarSatDeatils object
+            file name or RadarSatDetails object
         """
 
         if isinstance(radar_sat_details, string_types):
@@ -1561,7 +1564,9 @@ class RadarSatReader(BaseReader):
         for sicd_entry, file_entry in zip(the_sicds, the_files):
             the_chippers.extend(self._construct_chippers(sicd_entry, file_entry, symmetry))
             use_sicds.extend(sicd_entry)
-        super(RadarSatReader, self).__init__(tuple(use_sicds), tuple(the_chippers), reader_type="SICD")
+
+        SICDTypeReader.__init__(self, tuple(use_sicds))
+        BaseReader.__init__(self, tuple(the_chippers), reader_type="SICD")
 
     def _construct_chippers(self, sicds, data_files, symmetry):
         """

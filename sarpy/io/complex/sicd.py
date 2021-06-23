@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Module for reading SICD files - should support SICD version 0.3 and above.
 """
@@ -6,15 +5,21 @@ Module for reading SICD files - should support SICD version 0.3 and above.
 import re
 import sys
 import logging
+import os
+from datetime import datetime
+from typing import BinaryIO
 
 import numpy
 
+from sarpy.__about__ import __title__, __version__
 from sarpy.compliance import string_types
-from sarpy.io.general.base import validate_sicd_for_writing, AggregateChipper
+from sarpy.io.general.base import AggregateChipper, SarpyIOError
 from sarpy.io.general.nitf import NITFReader, NITFWriter, ImageDetails, DESDetails, \
     image_segmentation, get_npp_block, interpolate_corner_points_string
-from sarpy.io.general.utils import parse_xml_from_string
+from sarpy.io.general.utils import parse_xml_from_string, is_file_like
+from sarpy.io.complex.base import SICDTypeReader
 from sarpy.io.complex.sicd_elements.SICD import SICDType, get_specification_identifier
+from sarpy.io.complex.sicd_elements.ImageCreation import ImageCreationType
 
 from sarpy.io.general.nitf import NITFDetails
 from sarpy.io.general.nitf_elements.des import DataExtensionHeader, XMLDESSubheader
@@ -25,11 +30,9 @@ from sarpy.io.general.nitf_elements.image import ImageSegmentHeader, ImageBands,
 if sys.version_info[0] < 3:
     # noinspection PyUnresolvedReferences
     from cStringIO import StringIO
-    NOT_FOUND_ERROR = IOError
 else:
     # noinspection PyUnresolvedReferences
     from io import StringIO
-    NOT_FOUND_ERROR = FileNotFoundError
 
 __classification__ = "UNCLASSIFIED"
 __author__ = ("Thomas McCullough", "Wade Schwartzkopf")
@@ -60,7 +63,7 @@ def is_a(file_name):
             return SICDReader(nitf_details)
         else:
             return None
-    except IOError:
+    except SarpyIOError:
         return None
 
 
@@ -76,13 +79,13 @@ class SICDDetails(NITFDetails):
         '_des_index', '_des_header', '_is_sicd', '_sicd_meta',
         'img_segment_rows', 'img_segment_columns')
 
-    def __init__(self, file_name):
+    def __init__(self, file_object):
         """
 
         Parameters
         ----------
-        file_name : str
-            file name for a NITF 2.1 file containing a SICD
+        file_object : str|BinaryIO
+            file name or file like object for a NITF 2.1 or 2.0 containing a SICD.
         """
 
         self._des_index = None
@@ -90,18 +93,18 @@ class SICDDetails(NITFDetails):
         self._img_headers = None
         self._is_sicd = False
         self._sicd_meta = None
-        super(SICDDetails, self).__init__(file_name)
+        super(SICDDetails, self).__init__(file_object)
         if self._nitf_header.ImageSegments.subhead_sizes.size == 0:
-            raise IOError('There are no image segments defined.')
+            raise SarpyIOError('There are no image segments defined.')
         if self._nitf_header.GraphicsSegments.item_sizes.size > 0:
-            raise IOError('A SICD file does not allow for graphics segments.')
+            raise SarpyIOError('A SICD file does not allow for graphics segments.')
         if self._nitf_header.DataExtensions.subhead_sizes.size == 0:
-            raise IOError('A SICD file requires at least one data extension, containing the '
+            raise SarpyIOError('A SICD file requires at least one data extension, containing the '
                           'SICD xml structure.')
         # define the sicd metadata
         self._find_sicd()
         if not self.is_sicd:
-            raise IOError('Could not find the SICD XML des.')
+            raise SarpyIOError('Could not find the SICD XML des.')
         # populate the image details
         self.img_segment_rows = numpy.zeros(self.img_segment_offsets.shape, dtype=numpy.int64)
         self.img_segment_columns = numpy.zeros(self.img_segment_offsets.shape, dtype=numpy.int64)
@@ -277,8 +280,10 @@ class SICDDetails(NITFDetails):
                 "previous {} bytes. They cannot be trivially replaced.".format(des_bytes, des_size))
             return False
         des_loc = self.des_subheader_offsets[self._des_index]
+        if not os.path.exists(self._file_name):
+            raise ValueError('Operation not allowed.')
         with open(self._file_name, 'r+b') as fi:
-            fi.seek(des_loc)
+            fi.seek(des_loc, os.SEEK_SET)
             fi.write(des_bytes)
         return True
 
@@ -332,7 +337,7 @@ def amp_phase_to_complex(lookup_table):
     return converter
 
 
-class SICDReader(NITFReader):
+class SICDReader(NITFReader, SICDTypeReader):
     """
     A reader object for a SICD file (NITF container with SICD contents)
     """
@@ -342,21 +347,19 @@ class SICDReader(NITFReader):
 
         Parameters
         ----------
-        nitf_details : str|SICDDetails
-            filename or SICDDetails object
+        nitf_details :  : str|BinaryIO|SICDDetails
+            filename, file-like object, or SICDDetails object
         """
 
-        if isinstance(nitf_details, string_types):
+        if isinstance(nitf_details, string_types) or is_file_like(nitf_details):
             nitf_details = SICDDetails(nitf_details)
         if not isinstance(nitf_details, SICDDetails):
-            raise TypeError('The input argument for SICDReader must be a filename or '
-                            'SICDDetails object.')
-        super(SICDReader, self).__init__(nitf_details, reader_type="SICD")
+            raise TypeError(
+                'The input argument for SICDReader must be a filename, file-like object, '
+                'or SICDDetails object.')
 
-        # to perform a preliminary check that the structure is valid:
-        # self._sicd_meta.is_valid(recursive=True, stack=False)
-        # disable for now, due to noise of logging for now purpose
-        # leaving for documentation purposes
+        SICDTypeReader.__init__(self, nitf_details.sicd_meta)
+        NITFReader.__init__(self, nitf_details, reader_type='SICD')
 
     @property
     def nitf_details(self):
@@ -412,6 +415,49 @@ class SICDReader(NITFReader):
 
 #######
 #  The actual writing implementation
+
+def validate_sicd_for_writing(sicd_meta):
+    """
+    Helper method which ensures the provided SICD structure provides enough
+    information to support file writing, as well as ensures a few basic items
+    are populated as appropriate.
+
+    Parameters
+    ----------
+    sicd_meta : SICDType
+
+    Returns
+    -------
+    SICDType
+        This returns a deep copy of the provided SICD structure, with any
+        necessary modifications.
+    """
+
+    if not isinstance(sicd_meta, SICDType):
+        raise ValueError('sicd_meta is required to be an instance of SICDType, got {}'.format(type(sicd_meta)))
+    if sicd_meta.ImageData is None:
+        raise ValueError('The sicd_meta has un-populated ImageData, and nothing useful can be inferred.')
+    if sicd_meta.ImageData.NumCols is None or sicd_meta.ImageData.NumRows is None:
+        raise ValueError('The sicd_meta has ImageData with unpopulated NumRows or NumCols, '
+                         'and nothing useful can be inferred.')
+    if sicd_meta.ImageData.PixelType is None:
+        logging.warning('The PixelType for sicd_meta is unset, so defaulting to RE32F_IM32F.')
+        sicd_meta.ImageData.PixelType = 'RE32F_IM32F'
+
+    sicd_meta = sicd_meta.copy()
+
+    profile = '{} {}'.format(__title__, __version__)
+    if sicd_meta.ImageCreation is None:
+        sicd_meta.ImageCreation = ImageCreationType(
+            Application=profile,
+            DateTime=numpy.datetime64(datetime.now()),
+            Profile=profile)
+    else:
+        sicd_meta.ImageCreation.Profile = profile
+        if sicd_meta.ImageCreation.DateTime is None:
+            sicd_meta.ImageCreation.DateTime = numpy.datetime64(datetime.now())
+    return sicd_meta
+
 
 def _validate_input(data):
     # type: (numpy.ndarray) -> tuple

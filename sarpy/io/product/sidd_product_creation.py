@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Methods for creating a variety of SIDD products.
 
@@ -12,8 +11,7 @@ Create a variety of sidd products.
 
     from sarpy.io.complex.converter import open_complex
     from sarpy.processing.ortho_rectify import BivariateSplineMethod, NearestNeighborMethod, PGProjection
-    from sarpy.io.product.sidd_product_creation import create_detected_image_sidd, \
-        create_csi_sidd, create_dynamic_image_sidd
+    from sarpy.io.product.sidd_product_creation import create_detected_image_sidd, create_csi_sidd, create_dynamic_image_sidd
 
     # open a sicd type file
     reader = open_complex('<sicd type object file name>')
@@ -28,6 +26,9 @@ Create a variety of sidd products.
     create_dynamic_image_sidd(ortho_helper, '<output directory>', dimension=0, version=2)
 """
 
+__classification__ = "UNCLASSIFIED"
+__author__ = "Thomas McCullough"
+
 import os
 from sarpy.processing.ortho_rectify import OrthorectificationHelper, \
     FullResolutionFetcher, OrthorectificationIterator
@@ -35,10 +36,7 @@ from sarpy.io.product.sidd_structure_creation import create_sidd_structure
 from sarpy.processing.csi import CSICalculator
 from sarpy.processing.subaperture import SubapertureCalculator, SubapertureOrthoIterator
 from sarpy.io.product.sidd import SIDDWriter
-
-
-__classification__ = "UNCLASSIFIED"
-__author__ = "Thomas McCullough"
+from sarpy.io.general.base import SarpyIOError
 
 
 def _validate_filename(output_directory, output_file, sidd_structure):
@@ -63,12 +61,13 @@ def _validate_filename(output_directory, output_file, sidd_structure):
         full_filename = os.path.join(output_directory, output_file)
     full_filename = os.path.expanduser(full_filename)
     if os.path.exists(full_filename):
-        raise IOError('File {} already exists.'.format(full_filename))
+        raise SarpyIOError('File {} already exists.'.format(full_filename))
     return full_filename
 
 
 def create_detected_image_sidd(
-        ortho_helper, output_directory, output_file=None, block_size=10, dimension=0, bounds=None, version=2):
+        ortho_helper, output_directory, output_file=None, block_size=10, dimension=0,
+        bounds=None, version=2, include_sicd=True):
     """
     Create a SIDD version of a basic detected image from a SICD type reader.
 
@@ -90,6 +89,8 @@ def create_detected_image_sidd(
         This will default to the full image.
     version : int
         The SIDD version to use, must be one of 1 or 2.
+    include_sicd : bool
+        Include the SICD structure in the SIDD file?
 
     Returns
     -------
@@ -113,7 +114,7 @@ def create_detected_image_sidd(
     """
 
     if not os.path.isdir(output_directory):
-        raise IOError('output_directory {} does not exist or is not a directory'.format(output_directory))
+        raise SarpyIOError('output_directory {} does not exist or is not a directory'.format(output_directory))
 
     if not isinstance(ortho_helper, OrthorectificationHelper):
         raise TypeError(
@@ -136,7 +137,7 @@ def create_detected_image_sidd(
 
     # create the sidd writer
     full_filename = _validate_filename(output_directory, output_file, sidd_structure)
-    writer = SIDDWriter(full_filename, sidd_structure, ortho_helper.sicd)
+    writer = SIDDWriter(full_filename, sidd_structure, ortho_helper.sicd if include_sicd else None)
 
     # iterate and write
     for data, start_indices in ortho_iterator:
@@ -145,7 +146,7 @@ def create_detected_image_sidd(
 
 def create_csi_sidd(
         ortho_helper, output_directory, output_file=None, dimension=0,
-        block_size=30, bounds=None, version=2):
+        block_size=30, bounds=None, version=2, include_sicd=True):
     """
     Create a SIDD version of a Color Sub-Aperture Image from a SICD type reader.
 
@@ -167,6 +168,8 @@ def create_csi_sidd(
         This will default to the full image.
     version : int
         The SIDD version to use, must be one of 1 or 2.
+    include_sicd : bool
+        Include the SICD structure in the SIDD file?
 
     Returns
     -------
@@ -189,7 +192,7 @@ def create_csi_sidd(
     """
 
     if not os.path.isdir(output_directory):
-        raise IOError('output_directory {} does not exist or is not a directory'.format(output_directory))
+        raise SarpyIOError('output_directory {} does not exist or is not a directory'.format(output_directory))
 
     if not isinstance(ortho_helper, OrthorectificationHelper):
         raise TypeError(
@@ -214,7 +217,7 @@ def create_csi_sidd(
 
     # create the sidd writer
     full_filename = _validate_filename(output_directory, output_file, sidd_structure)
-    writer = SIDDWriter(full_filename, sidd_structure, csi_calculator.sicd)
+    writer = SIDDWriter(full_filename, sidd_structure, csi_calculator.sicd if include_sicd else None)
 
     # iterate and write
     for data, start_indices in ortho_iterator:
@@ -223,7 +226,7 @@ def create_csi_sidd(
 
 def create_dynamic_image_sidd(
         ortho_helper, output_directory, output_file=None, dimension=0, block_size=10,
-        bounds=None, frame_count=9, aperture_fraction=0.2, method='FULL', version=2):
+        bounds=None, frame_count=9, aperture_fraction=0.2, method='FULL', version=2, include_sicd=True):
     """
     Create a SIDD version of a Dynamic Image (Sub-Aperture Stack) from a SICD type reader.
 
@@ -252,6 +255,8 @@ def create_dynamic_image_sidd(
         `('NORMAL', 'FULL', 'MINIMAL')`.
     version : int
         The SIDD version to use, must be one of 1 or 2.
+    include_sicd : bool
+        Include the SICD structure in the SIDD file?
 
     Returns
     -------
@@ -275,7 +280,7 @@ def create_dynamic_image_sidd(
     """
 
     if not os.path.isdir(output_directory):
-        raise IOError('output_directory {} does not exist or is not a directory'.format(output_directory))
+        raise SarpyIOError('output_directory {} does not exist or is not a directory'.format(output_directory))
 
     if not isinstance(ortho_helper, OrthorectificationHelper):
         raise TypeError(
@@ -311,8 +316,8 @@ def create_dynamic_image_sidd(
     else:
         full_filename = os.path.join(output_directory, output_file)
     if os.path.exists(os.path.expanduser(full_filename)):
-        raise IOError('File {} already exists.'.format(full_filename))
-    writer = SIDDWriter(full_filename, the_sidds, subap_calculator.sicd)
+        raise SarpyIOError('File {} already exists.'.format(full_filename))
+    writer = SIDDWriter(full_filename, the_sidds, subap_calculator.sicd if include_sicd else None)
 
     # iterate and write
     for data, start_indices, the_frame in ortho_iterator:

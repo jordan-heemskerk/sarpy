@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Functionality for an aggregate sicd type reader, for opening multiple sicd type
 files as a single reader object.
@@ -12,10 +11,11 @@ from typing import List, Tuple
 
 from sarpy.compliance import string_types
 from sarpy.io.complex.converter import open_complex
-from sarpy.io.general.base import BaseReader, AggregateReader
+from sarpy.io.general.base import BaseReader, AggregateReader, SarpyIOError
+from sarpy.io.complex.base import SICDTypeReader
 
 
-class AggregateComplexReader(AggregateReader):
+class AggregateComplexReader(AggregateReader, SICDTypeReader):
     """
     Aggregate multiple sicd type files and/or readers into a single reader instance.
     """
@@ -31,9 +31,10 @@ class AggregateComplexReader(AggregateReader):
         """
 
         readers = self._validate_readers(readers)
-        super(AggregateComplexReader, self).__init__(readers, reader_type="SICD")
-        # define the SICD associated structures
-        self._define_sicds()
+        AggregateReader.__init__(self, readers, reader_type="SICD")
+
+        sicds = self._define_sicds()
+        SICDTypeReader.__init__(self, sicds)
 
     @staticmethod
     def _validate_readers(readers):
@@ -60,21 +61,25 @@ class AggregateComplexReader(AggregateReader):
             if isinstance(entry, string_types):
                 try:
                     reader = open_complex(entry)
-                except IOError:
-                    raise IOError(
+                except SarpyIOError:
+                    raise SarpyIOError(
                         'Attempted and failed to open {} (entry {} of the input argument) '
                         'using the complex opener.'.format(entry, i))
-            elif not isinstance(entry, BaseReader):
-                raise TypeError(
-                    'All elements of the input argument must be file names or BaseReader instances. '
-                    'Entry {} is of type {}'.format(i, type(entry)))
             else:
                 reader = entry
 
+            if not isinstance(entry, BaseReader):
+                raise TypeError(
+                    'All elements of the input argument must be file names or BaseReader instances. '
+                    'Entry {} is of type {}'.format(i, type(entry)))
             if reader.reader_type != "SICD":
                 raise ValueError(
                     'Entry {} of the input argument does not correspond to a sicd type reader. '
-                    'Got type {}, with reader_type value'.format(i, type(reader), reader.reader_type))
+                    'Got type {}, with reader_type value {}'.format(i, type(reader), reader.reader_type))
+            if not isinstance(reader, SICDTypeReader):
+                raise ValueError(
+                    'Entry {} of the input argument does not correspond to a SICDTypeReader instance. '
+                    'Got type {}.'.format(i, type(reader)))
             the_readers.append(reader)
         return tuple(the_readers)
 
@@ -84,4 +89,4 @@ class AggregateComplexReader(AggregateReader):
             reader = self._readers[reader_index]
             sicd = reader.get_sicds_as_tuple()[sicd_index]
             sicds.append(sicd)
-        self._sicd_meta = tuple(sicds)
+        return tuple(sicds)

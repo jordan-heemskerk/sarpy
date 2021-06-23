@@ -1,7 +1,9 @@
-# -*- coding: utf-8 -*-
 """
 Module providing api consistent with other file types for reading tiff files.
 """
+
+__classification__ = "UNCLASSIFIED"
+__author__ = ("Thomas McCullough", "Daniel Haverporth")
 
 # It was the original intent to use gdal for the bulk of tiff reading
 # Unfortunately, the necessary sarpy functionality can only be obtained by
@@ -10,15 +12,14 @@ Module providing api consistent with other file types for reading tiff files.
 # the reading capability is not feasible at present.
 
 import logging
+import os
+
 import numpy
 import re
+from typing import Tuple
 
-from sarpy.compliance import int_func
-from sarpy.io.general.base import BaseReader, BIPChipper
-
-
-__classification__ = "UNCLASSIFIED"
-__author__ = ("Thomas McCullough", "Daniel Haverporth")
+from sarpy.compliance import int_func, string_types
+from sarpy.io.general.base import BaseReader, BIPChipper, SarpyIOError
 
 
 _BASELINE_TAGS = {
@@ -154,7 +155,7 @@ def is_a(file_name):
         tiff_details = TiffDetails(file_name)
         logging.info('File {} is determined to be a tiff file.'.format(file_name))
         return TiffReader(tiff_details)
-    except IOError:
+    except SarpyIOError:
         # we don't want to catch parsing errors, for now
         return None
 
@@ -188,30 +189,33 @@ class TiffDetails(object):
         file_name : str
         """
 
+        if not (isinstance(file_name, string_types) and os.path.isfile(file_name)):
+            raise SarpyIOError('Not a TIFF file.')
+
         with open(file_name, 'rb') as fi:
             # Try to read the basic tiff header
             try:
                 fi_endian = fi.read(2).decode('utf-8')
             except:
-                raise IOError('Not a TIFF file.')
+                raise SarpyIOError('Not a TIFF file.')
 
             if fi_endian == 'II':
                 self._endian = '<'
             elif fi_endian == 'MM':
                 self._endian = '>'
             else:
-                raise IOError('Invalid tiff endian string {}'.format(fi_endian))
+                raise SarpyIOError('Invalid tiff endian string {}'.format(fi_endian))
             # check the magic number
             self._magic_number = numpy.fromfile(fi, dtype='{}i2'.format(self._endian), count=1)[0]
             if self._magic_number not in [42, 43]:
-                raise IOError('Not a valid tiff file, got magic number {}'.format(self._magic_number))
+                raise SarpyIOError('Not a valid tiff file, got magic number {}'.format(self._magic_number))
 
             if self._magic_number == 43:
                 rhead = numpy.fromfile(fi, dtype='{}i2'.format(self._endian), count=2)
                 if rhead[0] != 8:
-                    raise IOError('Not a valid bigtiff. The offset size is given as {}'.format(rhead[0]))
+                    raise SarpyIOError('Not a valid bigtiff. The offset size is given as {}'.format(rhead[0]))
                 if rhead[1] != 0:
-                    raise IOError('Not a valid bigtiff. The reserved entry of '
+                    raise SarpyIOError('Not a valid bigtiff. The reserved entry of '
                                   'the header is given as {} != 0'.format(rhead[1]))
         self._file_name = file_name
         self._tags = None
@@ -267,7 +271,7 @@ class TiffDetails(object):
 
         with open(self._file_name, 'rb') as fi:
             # skip the basic header
-            fi.seek(offset_size)
+            fi.seek(offset_size, os.SEEK_SET)
             # extract the tags information
             tags = {}
             self._parse_ifd(fi, tags, type_dtype, count_dtype, offset_dtype, offset_size)
@@ -473,16 +477,15 @@ class NativeTiffChipper(BIPChipper):
 
 
 class TiffReader(BaseReader):
-    __slots__ = ('_tiff_details', '_sicd_meta', '_chipper')
+    __slots__ = ('_tiff_details', )
     _DEFAULT_SYMMETRY = (False, False, False)
 
-    def __init__(self, tiff_details, sicd_meta=None, symmetry=None):
+    def __init__(self, tiff_details, symmetry=None):
         """
 
         Parameters
         ----------
         tiff_details : TiffDetails
-        sicd_meta : None|sarpy.io.complex.sicd_elements.SICD.SICDType
         symmetry : Tuple[bool]
         """
 
@@ -497,7 +500,7 @@ class TiffReader(BaseReader):
             symmetry = self._DEFAULT_SYMMETRY
 
         chipper = NativeTiffChipper(tiff_details, symmetry=symmetry)
-        super(TiffReader, self).__init__(sicd_meta, chipper, reader_type="OTHER")
+        super(TiffReader, self).__init__(chipper, reader_type="OTHER")
 
     @property
     def tiff_details(self):

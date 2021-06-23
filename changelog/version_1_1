@@ -1,5 +1,21 @@
 # This details the important differences introduced in sarpy 1.1
 
+* .78 - Improving documentation for geometry/projection elements
+* .77 - Bug fix in writing MONO16I SIDD
+* .76 - Refining examples and incorporating documentation hosting at readthedocs
+* .75 - Correcting bugs in the nrl, linear, and log remap functions
+* .74 - Introducing the ability to read SICD, SIDD, and some NITF files from file-like object
+        This is generally geared towards usage with smart_open for possible S3 usage
+* .73 - Correcting another mistake in the SIDD version 2 schema and element production
+* .72 - Corrected some mistakes in the included SIDD version 2 schema
+* .71 - Introducing basic SIDD consistency check, and debugging the squint calculation
+* .70 - Debugging SIDD Version 2.0 structure produced in create_product methods
+        Debugging of poor classification extraction in SIDD production for both versions
+        Reorganization of SIDD schemas and inclusion in package data
+* .69 - Debugging SIDD Version 1.0 structure producted in create_product methods
+* .68 - Introduction of a reader implementation which directly uses an array or memmap,
+        which is intended merely to provide unified integration for tool usage.
+* .67 - Fix for the range doppler rate polynomial definition for Cosmo SkyMed
 * .66 - Updating Cosmo SkyMed 2nd generation column impulse response population
         Introduces helper method for converting image coordinates to coordinates for polynomial evaluation
         Fixed sign convention in SICD related Fourier helper methods

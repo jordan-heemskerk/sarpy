@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 This module contains the base objects for use in the SICD elements, and the base serializable functionality.
 """
@@ -1390,6 +1389,25 @@ class Serializable(object):
                 'Ensure that this is not a typo of an expected field name.'.format(self.__class__.__name__, key))
         object.__setattr__(self, key, value)
 
+    def __getstate__(self):
+        """
+        Method for allowing copying and/or pickling of state.
+
+        Returns
+        -------
+        dict
+            The dict representation for the object.
+        """
+
+        return self.to_dict(check_validity=False, strict=False)
+
+    def __setstate__(self, the_dict):
+        """
+        Method for reconstructing from the serialized state.
+        """
+
+        return self.__init__(**the_dict)
+
     def set_numeric_format(self, attribute, format_string):
         """Sets the numeric format string for the given attribute.
 
@@ -1589,8 +1607,9 @@ class Serializable(object):
 
         if len(node) == 0 and len(node.attrib) == 0:
             logging.warning('There are no children or attributes associated\n'
-                            'with node {} for class {}. Returning None.'.format(node, cls))
-            return None
+                            'with node {}\n'
+                            'for class {}.'.format(node, cls))
+            # return None
 
         def handle_attribute(the_tag, the_xml_ns_key):
             if the_xml_ns_key is not None:  # handle namespace, if necessary
