@@ -7,12 +7,16 @@ __author__ = "Thomas McCullough"
 
 
 import logging
-from typing import Iterator
+from typing import Iterator, Tuple, List
 
 import numpy
 from numpy.polynomial import polynomial
+from scipy.stats import scoreatpercentile
 
+from sarpy.io.complex.base import SICDTypeReader
 from sarpy.io.complex.sicd_elements.blocks import Poly2DType
+
+logger = logging.getLogger(__name__)
 
 
 def two_dim_poly_fit(x, y, z, x_order=2, y_order=2, x_scale=1, y_scale=1, rcond=None):
@@ -55,6 +59,7 @@ def two_dim_poly_fit(x, y, z, x_order=2, y_order=2, x_scale=1, y_scale=1, rcond=
     # where A has shape (x.size, (x_order+1)*(y_order+1))
     # and t has shape ((x_order+1)*(y_order+1), )
     A = numpy.empty((x.size, (x_order+1)*(y_order+1)), dtype=numpy.float64)
+    # noinspection PyTypeChecker
     for i, index in enumerate(numpy.ndindex((x_order+1, y_order+1))):
         A[:, i] = numpy.power(x, index[0])*numpy.power(y, index[1])
     # perform least squares fit
@@ -125,58 +130,12 @@ def fit_time_coa_polynomial(inca, image_data, grid, dop_rate_scaled_coeffs, poly
     coefs, residuals, rank, sing_values = two_dim_poly_fit(
         coords_rg_2d, coords_az_2d, time_coa_sampled,
         x_order=poly_order, y_order=poly_order, x_scale=1e-3, y_scale=1e-3, rcond=1e-40)
-    logging.info('The time_coa_fit details:\nroot mean square residuals = {}\nrank = {}\nsingular values = {}'.format(residuals, rank, sing_values))
+    logger.info(
+        'The time_coa_fit details:\n\t'
+        'root mean square residuals = {}\n\t'
+        'rank = {}\n\t'
+        'singular values = {}'.format(residuals, rank, sing_values))
     return Poly2DType(Coefs=coefs)
-
-
-def snr_to_rniirs(bandwidth_area, signal, noise):
-    """
-    Calculate the information_density and RNIIRS estimate from bandwidth area and
-    signal/noise estimates.
-
-    It is assumed that geometric effects for signal and noise have been accounted for
-    (i.e. use SigmaZeroSFPoly), and signal and noise have each been averaged to a
-    single pixel value.
-
-    This mapping has been empirically determined by fitting Shannon-Hartley channel
-    capacity to RNIIRS for some sample images.
-
-    Parameters
-    ----------
-    bandwidth_area : float
-    signal : float
-    noise : float
-
-    Returns
-    -------
-    (float, float)
-        The information_density and RNIIRS
-    """
-
-    information_density = bandwidth_area*numpy.log2(1 + signal/noise)
-
-    a = numpy.array([3.7555, .3960], dtype=numpy.float64)
-    # we have empirically fit so that
-    #   rniirs = a_0 + a_1*log_2(information_density)
-
-    # note that if information_density is sufficiently small, it will
-    # result in negative values in the above functional form. This would be
-    # invalid for RNIIRS by definition, so we must avoid this case.
-
-    # We transition to a linear function of information_density
-    # below a certain point. This point will be chosen to be the (unique) point
-    # at which the line tangent to the curve intersects the origin, and the
-    # linear approximation below that point will be defined by this tangent line.
-
-    # via calculus, we can determine analytically where that happens
-    # rniirs_transition = a[1]/numpy.log(2)
-    iim_transition = numpy.exp(1 - numpy.log(2)*a[0]/a[1])
-    slope = a[1]/(iim_transition*numpy.log(2))
-
-    if information_density > iim_transition:
-        return information_density, a[0] + a[1]*numpy.log2(information_density)
-    else:
-        return information_density, slope*information_density
 
 
 def fit_position_xvalidation(time_array, position_array, velocity_array, max_degree=5):
@@ -220,7 +179,7 @@ def fit_position_xvalidation(time_array, position_array, velocity_array, max_deg
     if max_degree < 1:
         raise ValueError('max_degree must be at least 1.')
     if max_degree > 10:
-        logging.warning('max_degree greater than 10 for polynomial fitting may lead '
+        logger.warning('max_degree greater than 10 for polynomial fitting may lead\n\t'
                         'to poorly conditioned (i.e. badly behaved) fit.')
 
     deg = 1
@@ -253,7 +212,7 @@ def sicd_reader_iterator(reader, partitions=None, polarization=None, band=None):
 
     Parameters
     ----------
-    reader : BaseReader
+    reader : SICDTypeReader
     partitions : None|tuple
         The partitions collection. If None, then partitioning from
         `reader.get_sicd_partitions()` will be used.
@@ -276,15 +235,15 @@ def sicd_reader_iterator(reader, partitions=None, polarization=None, band=None):
             match &= (this_sicd.get_processed_polarization() == polarization)
         return match
 
-    from sarpy.io.general.base import BaseReader  # avoid circular import issue
-
-    if not isinstance(reader, BaseReader):
-        raise TypeError('reader must be an instance of BaseReader. Got type {}'.format(type(reader)))
+    if not isinstance(reader, SICDTypeReader):
+        raise TypeError('reader must be an instance of SICDTypeReader. Got type {}'.format(type(reader)))
     if reader.reader_type != "SICD":
         raise ValueError('The provided reader must be of SICD type.')
 
     if partitions is None:
+        # noinspection PyUnresolvedReferences
         partitions = reader.get_sicd_partitions()
+    # noinspection PyUnresolvedReferences
     the_sicds = reader.get_sicds_as_tuple()
     for this_partition, entry in enumerate(partitions):
         for this_index in entry:
@@ -311,3 +270,210 @@ def get_physical_coordinates(the_sicd, row_value, col_value):
 
     return get_im_physical_coords(row_value, the_sicd.Grid, the_sicd.ImageData, 'row'), \
            get_im_physical_coords(col_value, the_sicd.Grid, the_sicd.ImageData, 'col')
+
+
+
+###################
+# helper functions
+
+def get_fetch_block_size(start_element, stop_element, block_size_in_bytes, bands=1):
+    """
+    Gets the appropriate block size, given fetch parameters and constraints.
+
+    Note: this is a helper function, and no checking of argument validity will
+    be performed.
+
+    Parameters
+    ----------
+    start_element : int
+    stop_element : int
+    block_size_in_bytes : int
+    bands : int
+
+    Returns
+    -------
+    int
+    """
+
+    if stop_element == start_element:
+        return None
+    if block_size_in_bytes is None:
+        return None
+
+    full_size = float(abs(stop_element - start_element))
+    return max(1, int(numpy.ceil(block_size_in_bytes / float(bands*8*full_size))))
+
+
+def extract_blocks(the_range, index_block_size):
+    # type: (Tuple[int, int, int], int) -> (List[Tuple[int, int, int]], List[Tuple[int, int]])
+    """
+    Convert the single range definition into a series of range definitions in
+    keeping with fetching of the appropriate block sizes.
+
+    Note: this is a helper function, and no checking of argument validity will
+    be performed.
+
+    Parameters
+    ----------
+    the_range : Tuple[int, int, int]
+        The input (off processing axis) range.
+    index_block_size : None|int|float
+        The size of blocks (number of indices).
+
+    Returns
+    -------
+    List[Tuple[int, int, int]], List[Tuple[int, int]]
+        The sequence of range definitions `(start index, stop index, step)`
+        relative to the overall image, and the sequence of start/stop indices
+        for positioning of the given range relative to the original range.
+    """
+
+    entries = numpy.arange(the_range[0], the_range[1], the_range[2], dtype=numpy.int64)
+    if index_block_size is None:
+        return [the_range, ], [(0, entries.size), ]
+
+    # how many blocks?
+    block_count = int(numpy.ceil(entries.size/float(index_block_size)))
+    if index_block_size == 1:
+        return [the_range, ], [(0, entries.size), ]
+
+    # workspace for what the blocks are
+    out1 = []
+    out2 = []
+    start_ind = 0
+    for i in range(block_count):
+        end_ind = start_ind+index_block_size
+        if end_ind < entries.size:
+            block1 = (int(entries[start_ind]), int(entries[end_ind]), the_range[2])
+            block2 = (start_ind, end_ind)
+        else:
+            block1 = (int(entries[start_ind]), the_range[1], the_range[2])
+            block2 = (start_ind, entries.size)
+        out1.append(block1)
+        out2.append(block2)
+        start_ind = end_ind
+    return out1, out2
+
+
+def get_data_mean_magnitude(bounds, reader, index, block_size_in_bytes):
+    """
+    Gets the mean magnitude in the region defined by bounds.
+
+    Note: this is a helper function, and no checking of argument validity will
+    be performed.
+
+    Parameters
+    ----------
+    bounds : numpy.ndarray|tuple|list
+        Of the form `(row_start, row_end, col_start, col_end)`.
+    reader : SICDTypeReader
+        The data reader.
+    index : int
+        The reader index to use.
+    block_size_in_bytes : int|float
+        The block size in bytes.
+
+    Returns
+    -------
+    float
+    """
+
+    # Extract the mean of the data magnitude - for global remap usage
+    logger.info(
+        'Calculating mean over the block ({}:{}, {}:{}), this may be time consuming'.format(*bounds))
+    mean_block_size = get_fetch_block_size(bounds[0], bounds[1], block_size_in_bytes)
+    mean_column_blocks, _ = extract_blocks((bounds[2], bounds[3], 1), mean_block_size)
+    mean_total = 0.0
+    mean_count = 0
+    for this_column_range in mean_column_blocks:
+        data = numpy.abs(reader[
+                         bounds[0]:bounds[1],
+                         this_column_range[0]:this_column_range[1],
+                         index])
+        mask = (data > 0) & numpy.isfinite(data)
+        mean_total += numpy.sum(data[mask])
+        mean_count += numpy.sum(mask)
+    return float(mean_total / mean_count)
+
+
+def stats_calculation(data, percentile=None):
+    """
+    Calculate the statistics for input into the nrl remap.
+
+    Parameters
+    ----------
+    data : numpy.ndarray
+        The amplitude array, assumed real valued an finite.
+    percentile : None|float|int
+        Which percentile to calculate
+
+    Returns
+    -------
+    tuple
+        Of the form `(`minimum, maximum)` or `(minimum, maximum, `percentile` percentile)
+    """
+
+    if percentile is None:
+        return numpy.min(data), numpy.max(data)
+    else:
+        return numpy.min(data), numpy.max(data), scoreatpercentile(data, percentile)
+
+
+def get_data_extrema(bounds, reader, index, block_size_in_bytes, percentile=None):
+    """
+    Gets the minimum and maximum magnitude in the region defined by bounds,
+    optionally, get as **estimate** for the `percentage` percentile point.
+
+    Note: this is a helper function, and no checking of argument validity will
+    be performed.
+
+    Parameters
+    ----------
+    bounds : numpy.ndarray|tuple|list
+        Of the form `(row_start, row_end, col_start, col_end)`.
+    reader : SICDTypeReader
+        The data reader.
+    index : int
+        The reader index to use.
+    block_size_in_bytes : int|float
+        The block size in bytes.
+    percentile : None|int|float
+        The optional percentile to estimate.
+
+    Returns
+    -------
+    Tuple
+        The minimum (finite) observed, maximum (finite) observed, and optionally,
+        the desired (of finite) percentile.
+
+        The minimum, maximum, and percentile values will be `None` exactly when the reader
+        contains no finite data.
+    """
+
+    min_value = None
+    max_value = None
+    percent = None
+
+    # Extract the mean of the data magnitude - for global remap usage
+    logger.info(
+        'Calculating extrema over the block ({}:{}, {}:{}), this may be time consuming'.format(*bounds))
+    mean_block_size = get_fetch_block_size(bounds[0], bounds[1], block_size_in_bytes)
+    mean_column_blocks, _ = extract_blocks((bounds[2], bounds[3], 1), mean_block_size)
+    for this_column_range in mean_column_blocks:
+        data = numpy.abs(reader[
+                         bounds[0]:bounds[1],
+                         this_column_range[0]:this_column_range[1],
+                         index])
+        mask = numpy.isfinite(data)
+        if numpy.any(mask):
+            temp_values = stats_calculation(data[mask], percentile=percentile)
+
+            min_value = temp_values[0] if min_value is None else min(min_value, temp_values[0])
+            max_value = temp_values[1] if max_value is None else max(max_value, temp_values[1])
+            if percentile is not None:
+                percent = temp_values[2] if percent is None else temp_values[2]
+
+    if percentile is None:
+        return min_value, max_value
+    else:
+        return min_value, max_value, percent

@@ -7,14 +7,14 @@ __classification__ = "UNCLASSIFIED"
 __author__ = "Thomas McCullough"
 
 import os
-from typing import Union, Tuple, BinaryIO
+from typing import Union, Tuple, BinaryIO, Sequence
 import numpy
 import warnings
 
 from sarpy.compliance import string_types
 from sarpy.io.complex.sicd_elements.SICD import SICDType
 from sarpy.io.complex.sicd_elements.utils import is_general_match
-from sarpy.io.general.base import FlatReader, BaseChipper, is_file_like
+from sarpy.io.general.base import AbstractReader, FlatReader, BaseChipper, is_file_like
 
 try:
     import h5py
@@ -22,11 +22,12 @@ except ImportError:
     h5py = None
 
 
-class SICDTypeReader(object):
+class SICDTypeReader(AbstractReader):
     """
     An abstract class for ensuring common SICD metadata functionality.
 
-    This is intended to be used solely by extension.
+    This is intended to be used solely in conjunction with implementing a
+    legitimate reader.
     """
 
     def __init__(self, sicd_meta):
@@ -34,25 +35,23 @@ class SICDTypeReader(object):
 
         Parameters
         ----------
-        sicd_meta : None|SICDType|Tuple[SICDType]
+        sicd_meta : None|SICDType|Sequence[SICDType]
             `None`, the SICD metadata object, or tuple of objects
         """
 
-        if isinstance(sicd_meta, list):
-            sicd_meta = tuple(sicd_meta)
-
-        # validate sicd_meta input
         if sicd_meta is None:
-            pass
-        elif isinstance(sicd_meta, tuple):
+            self._sicd_meta = None
+        elif isinstance(sicd_meta, SICDType):
+            self._sicd_meta = sicd_meta
+        else:
+            temp_list = []
             for el in sicd_meta:
                 if not isinstance(el, SICDType):
                     raise TypeError(
                         'Got a collection for sicd_meta, and all elements are required '
                         'to be instances of SICDType.')
-        elif not isinstance(sicd_meta, SICDType):
-            raise TypeError('sicd_meta argument is required to be a SICDType, or collection of SICDType objects')
-        self._sicd_meta = sicd_meta
+                temp_list.append(el)
+            self._sicd_meta = tuple(temp_list)
 
     @property
     def sicd_meta(self):
@@ -169,6 +168,29 @@ class FlatSICDReader(FlatReader, SICDTypeReader):
             self, array, reader_type='SICD', output_bands=output_bands, output_dtype=output_dtype,
             symmetry=symmetry, transform_data=transform_data, limit_to_raw_bands=limit_to_raw_bands)
         SICDTypeReader.__init__(self, sicd_meta)
+
+    def write_to_file(self, output_file, check_older_version=False, check_existence=False):
+        """
+        Write a file for the given in-memory reader.
+
+        Parameters
+        ----------
+        output_file : str
+        check_older_version : bool
+            Try to use a less recent version of SICD (1.1), for possible application compliance issues?
+        check_existence : bool
+            Should we check if the given file already exists, and raise an exception if so?
+        """
+
+        if not isinstance(output_file, string_types):
+            raise TypeError(
+                'output_file is expected to a be a string, got type {}'.format(type(output_file)))
+
+        from sarpy.io.complex.sicd import SICDWriter
+        with SICDWriter(
+                output_file, self.sicd_meta,
+                check_older_version=check_older_version, check_existence=check_existence) as writer:
+            writer.write_chip(self[:, :], start_indices=(0, 0))
 
 
 class H5Chipper(BaseChipper):

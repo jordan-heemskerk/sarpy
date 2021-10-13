@@ -5,20 +5,24 @@ The general base elements for reading and writing image files.
 __classification__ = "UNCLASSIFIED"
 __author__ = "Thomas McCullough"
 
+import io
 import os
 import logging
-from typing import Union, Tuple, BinaryIO, Callable
+from typing import Union, Tuple, BinaryIO, Sequence, Optional
+from importlib import import_module
+import pkgutil
 
 import numpy
 
 from sarpy.compliance import int_func, integer_types, string_types
 from sarpy.io.general.utils import validate_range, reverse_range, is_file_like
 
+logger = logging.getLogger(__name__)
 
 ##################
 # module variables
 _SUPPORTED_TRANSFORM_VALUES = ('COMPLEX', )
-READER_TYPES = ('SICD', 'SIDD', 'CPHD', 'OTHER')
+READER_TYPES = ('SICD', 'SIDD', 'CPHD', 'CRSD', 'OTHER')
 
 
 #################
@@ -219,8 +223,8 @@ class BaseChipper(object):
         ----------
         range1 : None|int|tuple
             * if `None`, then the range is not limited in first axis
-            * if `int` = step size
-            * if (`int`, `int`) = `end`, `step size`
+            * if `int` = start
+            * if (`int`, `int`) = `start`, `stop`
             * if (`int`, `int`, `int`) = `start`, `stop`, `step size`
         range2 : None|int|tuple
             same as `range1`, except for the second axis.
@@ -306,8 +310,8 @@ class BaseChipper(object):
         ----------
         range1 : None|int|tuple
             * if `None`, then the range is not limited in first axis
-            * if `int` = step size
-            * if (`int`, `int`) = `end`, `step size`
+            * if `int` = start
+            * if (`int`, `int`) = `start`, `stop`
             * if (`int`, `int`, `int`) = `start`, `stop`, `step size`
         range2 : None|int|tuple
             same as `range1`, except for the second axis.
@@ -548,59 +552,17 @@ class AggregateChipper(BaseChipper):
 #################
 # Base Reader definition
 
-class BaseReader(object):
+class AbstractReader(object):
     """
-    Abstract file reader class
+    The abstract reader basic definition - essentially just an interface definition.
     """
 
     __slots__ = ('_chipper', '_data_size', '_reader_type')
 
-    def __init__(self, chipper, reader_type="OTHER"):
-        """
-
-        Parameters
-        ----------
-        chipper : BaseChipper|Tuple[BaseChipper]
-            a chipper object, or tuple of chipper objects
-        reader_type : str
-            What kind of reader is this? Allowable options are "SICD", "SIDD",
-            "CPHD", or "OTHER".
-        """
-        # set the reader_type state
-        if not isinstance(reader_type, string_types):
-            raise ValueError('reader_type must be a string, got {}'.format(type(reader_type)))
-        if reader_type not in READER_TYPES:
-            logging.error(
-                'reader_type has value {}, while it is expected to be '
-                'one of {}'.format(reader_type, READER_TYPES))
-        self._reader_type = reader_type
-        # adjust chipper inputs
-        if isinstance(chipper, list):
-            chipper = tuple(chipper)
-
-        # validate chipper input
-        if isinstance(chipper, tuple):
-            for el in chipper:
-                if not isinstance(el, BaseChipper):
-                    raise TypeError(
-                        'Got a collection for chipper, and all elements are required '
-                        'to be instances of BaseChipper.')
-        elif not isinstance(chipper, BaseChipper):
-            raise TypeError(
-                'chipper argument is required to be a BaseChipper instance, or collection of BaseChipper objects')
-        self._chipper = chipper
-
-        # determine data_size
-        if isinstance(chipper, BaseChipper):
-            data_size = chipper.data_size
-        else:
-            data_size = tuple(el.data_size for el in chipper)
-        self._data_size = data_size
-
     @property
     def reader_type(self):
         """
-        str: A descriptive string for the type of reader, should be one of "SICD", "SIDD", "CPHD", or "OTHER"
+        str: A descriptive string for the type of reader
         """
         return self._reader_type
 
@@ -614,13 +576,24 @@ class BaseReader(object):
         return self._data_size
 
     @property
-    def file_name(self):
-        # type: () -> str
+    def image_count(self):
         """
-        str: The file/path name for the reader object.
+        int: The number of images from which to read.
         """
 
-        raise NotImplementedError
+        if isinstance(self._chipper, tuple):
+            return len(self._chipper)
+        else:
+            return 1
+
+    @property
+    def file_name(self):
+        # type: () -> Optional[str]
+        """
+        None|str: Defined a convenience property.
+        """
+
+        return None
 
     def get_data_size_as_tuple(self):
         """
@@ -704,17 +677,8 @@ class BaseReader(object):
         :code:`data = reader[start:stop:stride, start:stop:stride, index]`
 
         Here the slice on index (dimension 3) is limited to a single integer, and
-        no slice on index :code:`reader[:, :]` will default to `index=0`,
+        no slice on the index :code:`reader[:, :]` will default to `index=0`,
         :code:`reader[:, :, 0]` (where appropriate).
-
-        The convention for precendence in the `range1` and `range2` arguments is
-        a little unusual. To clarify, the following are equivalent
-        :code:`reader(stride1, stride2)` yields the same as
-        :code:`reader((stride1, ), (stride2, ))` yields the same as
-        :code:`reader[::stride1, ::stride2]`.
-
-        :code:`reader((stop1, stride1), (stop2, stride2))` yields the same as
-        :code:`reader[:stop1:stride1, :stop2:stride2]`.
 
         :code:`reader((start1, stop1, stride1), (start2, stop2, stride2))`
         yields the same as :code:`reader[start1:stop1:stride1, start2:stop2:stride2]`.
@@ -797,26 +761,68 @@ class BaseReader(object):
         Here the slice on index (dimension 3) is limited to a single integer. No
         slice on index will default to `index=0`, that is :code:`reader[:, :]` and
         :code:`reader[:, :, 0]` yield equivalent results.
-
-        The convention for slice and call syntax is as expected from standard Python convention.
-        In the read_chip` method, the convention is a little unusual. The following yield
-        equivalent results
-
-        .. code-block:: python
-
-            data = reader.read_chip(stride1, stride2)
-            data = reader.read_chip((stride1, ), (stride2, ))
-            data = reader[::stride1, ::stride2]
-
-        Likewise, the following yield equivalent results
-
-        .. code-block:: python
-
-            data = reader.read_chip((stop1, stride1), (stop2, stride2))
-            data = reader[:stop1:stride1, :stop2:stride2]
         """
 
         return self.__call__(dim1range, dim2range, index=index)
+
+
+class BaseReader(AbstractReader):
+    """
+    Abstract file reader class
+    """
+
+    __slots__ = ('_chipper', '_data_size', '_reader_type')
+
+    def __init__(self, chipper, reader_type="OTHER"):
+        """
+
+        Parameters
+        ----------
+        chipper : BaseChipper|Tuple[BaseChipper]
+            a chipper object, or tuple of chipper objects
+        reader_type : str
+            What kind of reader is this? Allowable options are "SICD", "SIDD",
+            "CPHD", or "OTHER".
+        """
+        # set the reader_type state
+        if not isinstance(reader_type, string_types):
+            raise ValueError('reader_type must be a string, got {}'.format(type(reader_type)))
+        if reader_type not in READER_TYPES:
+            logger.error(
+                'reader_type has value {}, while it is expected to be '
+                'one of {}'.format(reader_type, READER_TYPES))
+        self._reader_type = reader_type
+        # adjust chipper inputs
+        if isinstance(chipper, list):
+            chipper = tuple(chipper)
+
+        # validate chipper input
+        if isinstance(chipper, tuple):
+            for el in chipper:
+                if not isinstance(el, BaseChipper):
+                    raise TypeError(
+                        'Got a collection for chipper, and all elements are required '
+                        'to be instances of BaseChipper.')
+        elif not isinstance(chipper, BaseChipper):
+            raise TypeError(
+                'chipper argument is required to be a BaseChipper instance, or collection of BaseChipper objects')
+        self._chipper = chipper
+
+        # determine data_size
+        if isinstance(chipper, BaseChipper):
+            data_size = chipper.data_size
+        else:
+            data_size = tuple(el.data_size for el in chipper)
+        self._data_size = data_size
+
+    @property
+    def file_name(self):
+        # type: () -> str
+        """
+        str: The file/path name for the reader object.
+        """
+
+        raise NotImplementedError
 
 
 class SubsetReader(BaseReader):
@@ -831,7 +837,7 @@ class SubsetReader(BaseReader):
 
         Parameters
         ----------
-        parent_reader : BaseReader
+        parent_reader : AbstractReader
         dim1bounds : tuple
         dim2bounds : tuple
         """
@@ -859,7 +865,7 @@ class AggregateReader(BaseReader):
 
         Parameters
         ----------
-        readers : List[BaseReader]
+        readers : Sequence[AbstractReader]
         reader_type : str
             The reader type string.
         """
@@ -876,11 +882,11 @@ class AggregateReader(BaseReader):
 
         Parameters
         ----------
-        readers : list|tuple
+        readers : Sequence[AbstractReader]
 
         Returns
         -------
-        Tuple[BaseReader]
+        Tuple[AbstractReader]
         """
 
         if not isinstance(readers, (list, tuple)):
@@ -889,9 +895,9 @@ class AggregateReader(BaseReader):
         # validate each entry
         the_readers = []
         for i, entry in enumerate(readers):
-            if not isinstance(entry, BaseReader):
+            if not isinstance(entry, AbstractReader):
                 raise TypeError(
-                    'All elements of the input argument must be file names or BaseReader instances. '
+                    'All elements of the input argument must be file names or reader instances. '
                     'Entry {} is of type {}'.format(i, type(entry)))
             the_readers.append(entry)
         return tuple(the_readers)
@@ -928,9 +934,9 @@ class AggregateReader(BaseReader):
 
     @property
     def file_name(self):
-        # type: () -> Tuple[str]
+        # type: () -> Tuple[Optional[str]]
         """
-        Tuple[str]: The filename collection.
+        Tuple[Optional[str]]: The filename collection.
         """
 
         return tuple(entry.file_name for entry in self._readers)
@@ -1075,9 +1081,10 @@ class AbstractWriter(object):
         if exception_type is None:
             self.close()
         else:
-            logging.error(
-                'The {} file writer generated an exception during processing. The file {} may be '
-                'only partially generated and corrupt.'.format(self.__class__.__name__, self._file_name))
+            logger.error(
+                'The {} file writer generated an exception during processing.\n\t'
+                'The file {} may be only partially generated and corrupt.'.format(
+                    self.__class__.__name__, self._file_name))
             # The exception will be reraised.
             # It's unclear how any exception could be caught.
 
@@ -1184,7 +1191,16 @@ class BIPChipper(BaseChipper):
             self._close_after = False
             self._file_name = data_input.name if hasattr(data_input, 'name') else None
 
+            try_memmap = False
             if hasattr(data_input, 'fileno'):
+                try:
+                    # check that fileno actually works, not just exists.
+                    data_input.fileno()
+                    try_memmap = True
+                except io.UnsupportedOperation:
+                    pass
+
+            if try_memmap:
                 # noinspection PyBroadException
                 try:
                     self._memory_map = numpy.memmap(data_input,
@@ -1194,8 +1210,8 @@ class BIPChipper(BaseChipper):
                                                     shape=self._shape)
                 except Exception as e:
                     # fall back to direct reading
-                    logging.error(
-                        'Error setting up a BIP chipper - {}\n'
+                    logger.error(
+                        'Error setting up a BIP chipper - {}\n\t'
                         'This may actually be fatal.'.format(e))
                     self._memory_map = None
             else:
@@ -1220,7 +1236,7 @@ class BIPChipper(BaseChipper):
                 #   constructing a memmap for any file larger than 2GB
                 self._file_object = open(self._file_name, mode='rb')
                 self._close_after = True
-                logging.warning(
+                logger.warning(
                     'Falling back to reading file {} manually, instead of using '
                     'numpy memmap.'.format(self._file_name))
         self._validate_limit_to_raw_bands(limit_to_raw_bands)
@@ -1519,9 +1535,9 @@ class BIRChipper(BaseChipper):
                 #   constructing a memmap for any file larger than 2GB
                 self._file_object = open(self._file_name, mode='rb')
                 self._close_after = True
-                logging.warning(
-                    'Falling back to reading file {} manually, instead of using '
-                    'numpy memmap.'.format(self._file_name))
+                logger.warning(
+                    'Falling back to reading file {} manually,\n\t'
+                    'instead of using numpy memmap.'.format(self._file_name))
         self._validate_limit_to_raw_bands(limit_to_raw_bands)
 
     def _validate_limit_to_raw_bands(self, limit_to_raw_bands):
@@ -1710,10 +1726,11 @@ class BIPWriter(AbstractWriter):
             # if 32-bit python, then we'll fail for any file larger than 2GB
             # we fall-back to a slower version of reading manually
             self._fid = open(self._file_name, mode='r+b')
-            logging.warning(
-                'Falling back to writing file {} manually (instead of using mem-map). This has almost '
-                'certainly occurred because you are 32-bit python to try to read (portions of) a file '
-                'which is larger than 2GB.'.format(self._file_name))
+            logger.warning(
+                'Falling back to writing file {} manually (instead of using mem-map).\n\t'
+                'This has almost certainly occurred because you are 32-bit python\n\t'
+                'to try to read (portions of) a file which is larger than 2GB.'.format(
+                    self._file_name))
 
     def write_chip(self, data, start_indices=(0, 0)):
         self.__call__(data, start_indices=start_indices)
@@ -1818,8 +1835,33 @@ class BIPWriter(AbstractWriter):
         if exception_type is None:
             self.close()
         else:
-            logging.error(
-                'The {} file writer generated an exception during processing. The file {} may be '
-                'only partially generated and corrupt.'.format(self.__class__.__name__, self._file_name))
+            logger.error(
+                'The {} file writer generated an exception during processing.\n\t'
+                'The file {} may be only partially generated and corrupt.'.format(
+                    self.__class__.__name__, self._file_name))
             # The exception will be reraised.
             # It's unclear how any exception could be caught.
+
+
+############
+# module walking to register openers
+
+def check_for_openers(start_package, register_method):
+    """
+    Walks the package, and registers the discovered openers.
+
+    Parameters
+    ----------
+    start_package : str
+    register_method : Callable
+    """
+
+    module = import_module(start_package)
+    for details in pkgutil.walk_packages(module.__path__, start_package+'.'):
+        _, module_name, is_pkg = details
+        if is_pkg:
+            # don't bother checking for packages
+            continue
+        sub_module = import_module(module_name)
+        if hasattr(sub_module, 'is_a'):
+            register_method(sub_module.is_a)

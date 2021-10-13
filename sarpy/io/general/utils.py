@@ -2,15 +2,15 @@
 Common functionality for converting metadata
 """
 
-from xml.etree import ElementTree
+__classification__ = "UNCLASSIFIED"
+__author__ = "Thomas McCullough"
+
+
 from typing import Union, Tuple
 
 import numpy
 
-from sarpy.compliance import integer_types, int_func, string_types, StringIO, bytes_to_string
-
-__classification__ = "UNCLASSIFIED"
-__author__ = "Thomas McCullough"
+from sarpy.compliance import integer_types, int_func
 
 
 def validate_range(arg, siz):
@@ -33,13 +33,16 @@ def validate_range(arg, siz):
     if arg is None:
         pass
     elif isinstance(arg, integer_types):
-        step = arg
+        start = arg
+        stop = arg + 1
+        step = 1
     else:
         # NB: following this pattern to avoid confused pycharm inspection
         if len(arg) == 1:
-            step = arg[0]
+            start = int(arg[0])
+            stop = start + 1
         elif len(arg) == 2:
-            stop, step = arg
+            start, stop = arg
         elif len(arg) == 3:
             start, stop, step = arg
     start = 0 if start is None else int_func(start)
@@ -130,31 +133,6 @@ def get_seconds(dt1, dt2, precision='us'):
     tdt1 = dt1.astype(dtype)
     tdt2 = dt2.astype(dtype)
     return float((tdt1.astype('int64') - tdt2.astype('int64'))*scale)
-
-
-def parse_xml_from_string(xml_string):
-    """
-    Parse the ElementTree root node and xml namespace dict from an xml string.
-
-    Parameters
-    ----------
-    xml_string : str|bytes
-
-    Returns
-    -------
-    (ElementTree.Element, dict)
-    """
-
-    xml_string = bytes_to_string(xml_string, encoding='utf-8')
-
-    root_node = ElementTree.fromstring(xml_string)
-    # define the namespace dictionary
-    xml_ns = dict([node for _, node in ElementTree.iterparse(StringIO(xml_string), events=('start-ns',))])
-    if len(xml_ns.keys()) == 0:
-        xml_ns = None
-    elif '' in xml_ns:
-        xml_ns['default'] = xml_ns['']
-    return root_node, xml_ns
 
 
 def is_file_like(the_input):

@@ -1,8 +1,12 @@
 """
 Base NITF Header functionality definition.
 """
+__classification__ = "UNCLASSIFIED"
+__author__ = "Thomas McCullough"
+
 
 import logging
+import sys
 from weakref import WeakKeyDictionary
 from typing import Union, List, Tuple
 from collections import OrderedDict
@@ -13,13 +17,10 @@ import numpy
 from sarpy.compliance import int_func, integer_types, string_types, bytes_to_string
 from .tres.registration import find_tre
 
-
-__classification__ = "UNCLASSIFIED"
-__author__ = "Thomas McCullough"
+logger = logging.getLogger(__name__)
 
 
 # Base NITF type
-
 class BaseNITFElement(object):
 
     @classmethod
@@ -86,6 +87,7 @@ class BaseNITFElement(object):
 
         raise NotImplementedError
 
+
 # Basic input and output interpreters
 
 def _get_bytes(val, length):
@@ -96,7 +98,17 @@ def _get_bytes(val, length):
         return frm_str.format(val).encode('utf-8')
     elif isinstance(val, string_types):
         frm_str = '{0:' + str(length) + 's}'
-        return frm_str.format(val).encode('utf-8')
+        if sys.version_info[0] >= 3:
+            return frm_str.format(val).encode('utf-8')
+        else:
+            # noinspection PyBroadException
+            try:
+                return frm_str.format(val).encode('utf-8')
+            except Exception:
+                if len(val) >= length:
+                    return val[:length]
+                else:
+                    return val + b'\x00' * (length - len(val))
     elif isinstance(val, bytes):
         if len(val) >= length:
             return val[:length]
@@ -160,7 +172,7 @@ def _parse_str(val, length, default, name, instance):
     if len(val) <= length:
         return val
     else:
-        logging.warning(
+        logger.warning(
             'Got string input value of length {} for attribute {} of class {}, '
             'which is longer than the allowed length {}, so '
             'truncating'.format(len(val), name, instance.__class__.__name__, length))
@@ -188,7 +200,7 @@ def _parse_bytes(val, length, default, name, instance):
         if len(val) <= length:
             return val
         else:
-            logging.warning(
+            logger.warning(
                 'Got string input value of length {} for attribute {} of class {}, '
                 'which is longer than the allowed length {}, so '
                 'truncating'.format(len(val), name, instance.__class__.__name__, length))
@@ -378,13 +390,13 @@ class _StringEnumDescriptor(_BasicDescriptor):
             msg = 'Attribute {} of class {} received {}, but values ARE REQUIRED to be ' \
                   'one of {}. It has been set to the default ' \
                   'value.'.format(self.name, instance.__class__.__name__, value, self.values)
-            logging.error(msg)
+            logger.error(msg)
             self.data[instance] = self._default_value
         else:
             msg = 'Attribute {} of class {} received {}, but values ARE REQUIRED to be ' \
                   'one of {}. This should be resolved, or it may cause unexpected ' \
                   'issues.'.format(self.name, instance.__class__.__name__, value, self.values)
-            logging.error(msg)
+            logger.error(msg)
             self.data[instance] = val
 
 
@@ -462,10 +474,11 @@ class NITFElement(BaseNITFElement):
 
     def __init__(self, **kwargs):
         for fld in self._ordering:
+            # noinspection PyBroadException
             try:
                 setattr(self, fld, kwargs.get(fld, None))
-            except:
-                logging.critical('Failed setting attribute {} for class {}'.format(fld, self.__class__))
+            except Exception:
+                logger.critical('Failed setting attribute {} for class {}'.format(fld, self.__class__))
                 raise
 
     @classmethod
@@ -616,7 +629,7 @@ class NITFElement(BaseNITFElement):
             elif isinstance(value, BaseNITFElement):
                 out[fld] = value.to_json()
             else:
-                logging.error(
+                logger.error(
                     'Got unhandled type `{}` for json serialization for '
                     'attribute `{}` of class {}'.format(type(value), fld, self.__class__))
         return out
@@ -935,7 +948,7 @@ class TRE(BaseNITFElement):
             try:
                 return known_tre.from_bytes(value, start)
             except Exception as e:
-                logging.error(
+                logger.error(
                     "Returning unparsed tre, because we failed parsing tre as "
                     "type {} with exception\n\t{}".format(known_tre.__name__, e))
         return UnknownTRE.from_bytes(value, start)
@@ -1065,7 +1078,7 @@ class TREList(NITFElement):
                 tre = TRE.from_bytes(value, loc)
                 parsed_length = tre.get_bytes_length()
                 if parsed_length != anticipated_length:
-                    logging.error(
+                    logger.error(
                         'The given length for TRE {} instance is {}, but the constructed length is {}. '
                         'This is the result of a malformed TRE object definition. '
                         'If possible, this should be reported to the sarpy team for review/repair.'.format(

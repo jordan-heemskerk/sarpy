@@ -3,25 +3,26 @@ This module provide utilities for converting from any complex format that we can
 read to SICD or SIO format. The same conversion utility can be used to subset data.
 """
 
+__classification__ = "UNCLASSIFIED"
+__author__ = ("Wade Schwartzkopf", "Thomas McCullough")
+
+
 import os
-import sys
-import pkgutil
-from importlib import import_module
 import numpy
 import logging
 from typing import Union, List, Tuple
 
 from sarpy.compliance import int_func
-from sarpy.io.general.base import BaseReader, SarpyIOError
+from sarpy.io.general.base import SarpyIOError, check_for_openers
+from sarpy.io.general.nitf import NITFReader
 from sarpy.io.general.utils import is_file_like
+from sarpy.io.complex.base import SICDTypeReader
 from sarpy.io.complex.sicd import SICDWriter
 from sarpy.io.complex.sio import SIOWriter
 from sarpy.io.complex.sicd_elements.SICD import SICDType
 
 
-__classification__ = "UNCLASSIFIED"
-__author__ = ("Wade Schwartzkopf", "Thomas McCullough")
-
+logger = logging.getLogger(__name__)
 
 ###########
 # Module variables
@@ -38,7 +39,7 @@ def register_opener(open_func):
     ----------
     open_func : callable
         This is required to be a function which takes a single argument (file name).
-        This function should return a sarpy.io.complex.base.BaseReader instance
+        This function should return a sarpy.io.complex.base.SICDTypeReader instance
         if the referenced file is viable for the underlying type, and None otherwise.
 
     Returns
@@ -55,10 +56,6 @@ def register_opener(open_func):
 def parse_openers():
     """
     Automatically find the viable openers (i.e. :func:`is_a`) in the various modules.
-
-    Returns
-    -------
-
     """
 
     global _parsed_openers
@@ -66,26 +63,7 @@ def parse_openers():
         return
     _parsed_openers = True
 
-    def check_module(mod_name):
-        # import the module
-        import_module(mod_name)
-        # fetch the module from the modules dict
-        module = sys.modules[mod_name]
-        # see if it has an is_a function, if so, register it
-        if hasattr(module, 'is_a'):
-            register_opener(module.is_a)
-
-        # walk down any subpackages
-        path, fil = os.path.split(module.__file__)
-        if not fil.startswith('__init__.py'):
-            # there are no subpackages
-            return
-        for sub_module in pkgutil.walk_packages([path, ]):
-            _, sub_module_name, _ = sub_module
-            sub_name = "{}.{}".format(mod_name, sub_module_name)
-            check_module(sub_name)
-
-    check_module('sarpy.io.complex')
+    check_for_openers('sarpy.io.complex', register_opener)
 
 
 def _define_final_attempt_openers():
@@ -111,7 +89,7 @@ def open_complex(file_name):
 
     Returns
     -------
-    BaseReader
+    SICDTypeReader
 
     Raises
     ------
@@ -152,7 +130,7 @@ class Converter(object):
 
         Parameters
         ----------
-        reader : BaseReader
+        reader : SICDTypeReader
             The base reader instance.
         output_directory : str
             The output directory. **This must exist.**
@@ -174,10 +152,16 @@ class Converter(object):
             Should we check if the given file already exists, and raises an exception if so?
         """
 
+        if isinstance(reader, SICDTypeReader):
+            self._reader = reader
+        else:
+            raise ValueError(
+                'reader is expected to be a Reader instance. Got {}'.format(type(reader)))
+
         if not (os.path.exists(output_directory) and os.path.isdir(output_directory)):
             raise SarpyIOError('output directory {} must exist.'.format(output_directory))
         if output_file is None:
-            output_file = reader.get_sicds_as_tuple()[frame].get_suggested_name(frame+1)+'_SICD'
+            output_file = self._reader.get_sicds_as_tuple()[frame].get_suggested_name(frame+1)+'_SICD'
         output_path = os.path.join(output_directory, output_file)
         if check_existence and os.path.exists(output_path):
             raise SarpyIOError('The file {} already exists.'.format(output_path))
@@ -190,15 +174,9 @@ class Converter(object):
             raise ValueError('Got unexpected output_format {}'.format(output_format))
         writer_type = _writer_types[output_format]
 
-        if isinstance(reader, BaseReader):
-            self._reader = reader  # type: BaseReader
-        else:
-            raise ValueError(
-                'reader is expected to be a Reader instance. Got {}'.format(type(reader)))
-
         # fetch the appropriate sicd instance
-        sicds = reader.get_sicds_as_tuple()
-        shapes = reader.get_data_size_as_tuple()
+        sicds = self._reader.get_sicds_as_tuple()
+        shapes = self._reader.get_data_size_as_tuple()
         if frame is None:
             self._frame = 0
         else:
@@ -293,7 +271,7 @@ class Converter(object):
             block_end = min(block_start + rows_per_block, self._row_limits[1])
             data = self._reader[block_start:block_end, self._col_limits[0]:self._col_limits[1], self._frame]
             self._writer.write_chip(data, start_indices=(block_start - self._row_limits[0], 0))
-            logging.info('Done writing block {}-{} to file {}'.format(block_start, block_end, self._file_name))
+            logger.info('Done writing block {}-{} to file {}'.format(block_start, block_end, self._file_name))
             block_start = block_end
 
     def __del__(self):
@@ -307,22 +285,24 @@ class Converter(object):
         if exception_type is None:
             self._writer.close()
         else:
-            logging.error(
-                'The {} file converter generated an exception during processing. The file {} may be '
-                'only partially generated and corrupt.'.format(self.__class__.__name__, self._file_name))
+            logger.error(
+                'The {} file converter generated an exception during processing.\n\t'
+                'The file {} may be only partially generated and corrupt.'.format(
+                    self.__class__.__name__, self._file_name))
             # The exception will be reraised.
             # It's unclear how any exception could be caught.
 
 
 def conversion_utility(
         input_file, output_directory, output_files=None, frames=None, output_format='SICD',
-        row_limits=None, column_limits=None, max_block_size=None, check_older_version=False):
+        row_limits=None, column_limits=None, max_block_size=None, check_older_version=False,
+        preserve_nitf_information=False, check_existence=True):
     """
     Copy SAR complex data to a file of the specified format.
 
     Parameters
     ----------
-    input_file : str|BaseReader
+    input_file : str|SICDTypeReader
        Reader instance, or the name of file to convert.
     output_directory : str
         The output directory. **This must exist.**
@@ -341,6 +321,11 @@ def conversion_utility(
         (nominal) maximum block size in bytes. Passed through to the Converter class.
     check_older_version : bool
         Try to use a less recent version of SICD (1.1), for possible application compliance issues?
+    preserve_nitf_information : bool
+        Try to preserve NITF information? This only applies in the case that the file being read
+        is actually a NITF file.
+    check_existence : bool
+        Check for the existence of any possibly overwritten file?
 
     Returns
     -------
@@ -372,9 +357,11 @@ def conversion_utility(
             else:
                 if o_lims.shape[0] != len(frames):
                     raise ValueError(
-                        '{0:s}_limits must either be of the form (<start>, <end>) applied to all frames, '
-                        'or a collection of such of the same length as frames. '
-                        'Got len({0:s}_limits) = {1:d} and len(frames) = {2:d}'.format(typ, o_lims.shape[0], len(frames)))
+                        '{0:s}_limits must either be of the form (<start>, <end>)\n\t'
+                        'applied to all frames, or a collection of such of the \n\t'
+                        'same length as frames.\n\t'
+                        'Got len({0:s}_limits) = {1:d} and len(frames) = {2:d}'.format(
+                            typ, o_lims.shape[0], len(frames)))
                 for entry, i_frame, shp in zip(o_lims, frames, sizes):
                     t_start = int_func(entry[0])
                     t_end = int_func(entry[1])
@@ -384,11 +371,21 @@ def conversion_utility(
 
     if isinstance(input_file, str):
         reader = open_complex(input_file)
-    elif isinstance(input_file, BaseReader):
+    elif isinstance(input_file, SICDTypeReader):
         reader = input_file
     else:
         raise ValueError(
-            'input_file is expected to be a file name or Reader instance. Got {}'.format(type(input_file)))
+            'input_file is expected to be a file name or Reader instance.\n\t'
+            'Got {}'.format(type(input_file)))
+
+    if preserve_nitf_information and isinstance(reader, NITFReader):
+        try:
+            # noinspection PyUnresolvedReferences
+            reader.populate_nitf_information_into_sicd()
+        except AttributeError:
+            logger.warning(
+                'Reader class `{}` is missing populate_nitf_information_into_sicd '
+                'method'.format(type(reader)))
 
     if not (os.path.exists(output_directory) and os.path.isdir(output_directory)):
         raise SarpyIOError('output directory {} must exist.'.format(output_directory))
@@ -422,13 +419,10 @@ def conversion_utility(
             suggested_name = sicd.CollectionInfo.CoreName+'{}_SICD'.format(frame)
         if suggested_name is None:
             suggested_name = 'Unknown{}_SICD'.format(frame)
-        if hasattr(sicd, '_NITF') and isinstance(sicd._NITF, dict):
-            sicd._NITF['SUGGESTED_NAME'] = suggested_name
-        else:
-            sicd._NITF = {'SUGGESTED_NAME': suggested_name}
+        sicd.NITF['SUGGESTED_NAME'] = suggested_name
     # construct output_files list
     if output_files is None:
-        output_files = [sicds[frame]._NITF['SUGGESTED_NAME']+'.nitf' for frame in frames]
+        output_files = [sicds[frame].NITF['SUGGESTED_NAME']+'.nitf' for frame in frames]
     elif isinstance(output_files, str):
         if len(sicds) == 1:
             output_files = [output_files, ]
@@ -445,16 +439,18 @@ def conversion_utility(
         raise ValueError('The lengths of frames and output_files must match.')
     if len(set(output_files)) != len(output_files):
         raise ValueError(
-            'Entries in output_files (possibly constructed) must be unique, got {} for frames {}'.format(output_files, frames))
+            'Entries in output_files (possibly constructed) must be unique,\n\t'
+            'got {} for frames {}'.format(output_files, frames))
 
     # construct validated row/column_limits
     row_limits = validate_lims(row_limits, 'row')
     column_limits = validate_lims(column_limits, 'column')
 
     for o_file, frame, row_lims, col_lims in zip(output_files, frames, row_limits, column_limits):
-        logging.info('Converting frame {} from file {} to file {}'.format(frame, input_file, o_file))
+        logger.info('Converting frame {} from file {} to file {}'.format(frame, input_file, o_file))
         with Converter(
                 reader, output_directory, output_file=o_file, frame=frame,
                 row_limits=row_lims, col_limits=col_lims, output_format=output_format,
-                check_older_version=check_older_version) as converter:
+                check_older_version=check_older_version,
+                check_existence=check_existence) as converter:
             converter.write_data(max_block_size=max_block_size)

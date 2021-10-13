@@ -21,8 +21,11 @@ Create a kmz overview for the contents of a sicd type reader.
                     file_stem='View-<something descriptive>',
                     pixel_limit=2048,
                     inc_collection_wedge=True)
-
 """
+
+__classification__ = "UNCLASSIFIED"
+__author__ = "Thomas McCullough"
+
 
 import logging
 from typing import Union
@@ -32,14 +35,16 @@ import os
 import numpy
 
 from sarpy.compliance import int_func, integer_types
-from sarpy.io.general.base import BaseReader
 from sarpy.processing.ortho_rectify import OrthorectificationHelper, \
     NearestNeighborMethod, PGProjection, FullResolutionFetcher, \
     OrthorectificationIterator
 from sarpy.io.kml import Document
+from sarpy.io.complex.base import SICDTypeReader
 from sarpy.io.complex.sicd_elements.SICD import SICDType
 from sarpy.io.complex.utils import sicd_reader_iterator
 from sarpy.geometry.geocoords import ecf_to_geodetic
+from sarpy.visualization.remap import RemapFunction, NRL
+
 
 try:
     # noinspection PyPackageRequirements
@@ -48,9 +53,7 @@ try:
 except ImportError:
     PIL = None
 
-
-__classification__ = "UNCLASSIFIED"
-__author__ = "Thomas McCullough"
+logger = logging.getLogger(__name__)
 
 
 def _create_sicd_styles(kmz_document):
@@ -174,10 +177,12 @@ def _get_orthoiterator_description(ortho_iterator):
 
     return 'ortho-rectified image for {2:s}<br>' \
            'row resolution - {0:0.2f} meters<br>' \
-           'column resolution - {1:0.2f} meters'.format(
+           'column resolution - {1:0.2f} meters<br>' \
+           'remap function - {3:s}'.format(
         ortho_iterator.ortho_helper.proj_helper.row_spacing,
         ortho_iterator.ortho_helper.proj_helper.col_spacing,
-        _get_sicd_name(ortho_iterator.sicd))
+        _get_sicd_name(ortho_iterator.sicd),
+        ortho_iterator.remap_function.name)
 
 
 def _get_sicd_time_args(sicd, subdivisions=24):
@@ -235,7 +240,7 @@ def _write_image_corners(kmz_document, sicd, time_args, folder, write_points=Tru
     corners = sicd.GeoData.ImageCorners.get_array(dtype='float64')
 
     if numpy.any(~numpy.isfinite(corners)):
-        logging.error('There are nonsense entries (nan or +/- infinity) in the corner locations array.')
+        logger.error('There are nonsense entries (nan or +/- infinity) in the corner locations array.')
 
     if write_points:
         names = ['FRFC', 'FRLC', 'LRLC', 'LRFC']
@@ -275,7 +280,7 @@ def _write_valid_area(kmz_document, sicd, time_args, folder):
     frm = '{1:0.8f},{0:0.8f},0'
     valid_array = sicd.GeoData.ValidData.get_array(dtype='float64')
     if numpy.any(~numpy.isfinite(valid_array)):
-        logging.error('There are nonsense entries (nan or +/- infinity) in the valid array location.')
+        logger.error('There are nonsense entries (nan or +/- infinity) in the valid array location.')
 
     coords = ' '.join(frm.format(*el) for el in valid_array)
     coords += ' ' + frm.format(*valid_array[0, :])
@@ -303,7 +308,7 @@ def _write_scp(kmz_document, sicd, time_args, folder):
 
     scp_llh = sicd.GeoData.SCP.LLH.get_array()
     if numpy.any(~numpy.isfinite(scp_llh)):
-        logging.error('There are nonsense entries (nan or +/- infinity) in the scp location.')
+        logger.error('There are nonsense entries (nan or +/- infinity) in the scp location.')
 
     frm = '{1:0.8f},{0:0.8f},0'
     coords = frm.format(*scp_llh)
@@ -339,7 +344,7 @@ def _write_arp_location(kmz_document, sicd, time_args, time_array, folder):
 
     arp_llh = ecf_to_geodetic(arp_pos)
     if numpy.any(~numpy.isfinite(arp_llh)):
-        logging.error('There are nonsense entries (nan or +/- infinity) in the aperture location.')
+        logger.error('There are nonsense entries (nan or +/- infinity) in the aperture location.')
     coords = ['{1:0.8f},{0:0.8f},{2:0.2f}'.format(*el) for el in arp_llh]
     whens = [str(sicd.Timeline.CollectStart.astype('datetime64[us]') + int_func(el*1e6)) + 'Z' for el in time_array]
     placemark = kmz_document.add_container(par=folder, description='aperture position for {}'.format(_get_sicd_name(sicd)), styleUrl='#arp', **time_args)
@@ -378,7 +383,7 @@ def _write_collection_wedge(kmz_document, sicd, time_args, arp_llh, time_array, 
     grp_llh = ecf_to_geodetic(grp)
 
     if numpy.any(~numpy.isfinite(grp_llh)):
-        logging.error('There are nonsense entries (nan or +/- infinity) in the scp/ground range locations.')
+        logger.error('There are nonsense entries (nan or +/- infinity) in the scp/ground range locations.')
 
     coord_array = [frm.format(*el) for el in arp_llh]
     if len(grp_llh) > 1:
@@ -410,14 +415,16 @@ def _write_sicd_overlay(ortho_iterator, kmz_document, folder):
         return llh_in[::-1, :]
 
     if PIL is None:
-        logging.error(
+        logger.error(
             'This functionality for writing kmz ground overlays requires the optional Pillow dependency.')
         return
 
     time_args, _ = _get_sicd_time_args(ortho_iterator.sicd, subdivisions=None)
 
     # create the output workspace
-    image_data = numpy.zeros(ortho_iterator.ortho_data_size, dtype='uint8')
+    if ortho_iterator.remap_function.bit_depth != 8:
+        raise ValueError('The bit depth for the remap function must be 8, for now.')
+    image_data = numpy.zeros(ortho_iterator.ortho_data_size, dtype=ortho_iterator.remap_function.output_dtype)
     # populate by iterating
     for data, start_indices in ortho_iterator:
         image_data[start_indices[0]:start_indices[0]+data.shape[0],
@@ -498,7 +505,7 @@ def add_sicd_geometry_elements(sicd, kmz_document, folder,
 def add_sicd_from_ortho_helper(kmz_document, ortho_helper,
         inc_image_corners=False, inc_valid_data=False,
         inc_scp=False, inc_collection_wedge=False,
-        block_size=10, dmin=30, mmult=4):
+        block_size=10, remap_function=None):
     """
     Adds for a SICD to the provided open kmz from an ortho-rectification helper.
 
@@ -516,14 +523,8 @@ def add_sicd_from_ortho_helper(kmz_document, ortho_helper,
         Include the aperture location and collection wedge?
     block_size : None|int|float
         The block size for the iterator
-    dmin : int|float
-        The remap parameters - the default is the high contrast remap value.
-    mmult : int|float
-        The remap parameters - the default is the high contrast remap value.
-
-    Returns
-    -------
-    None
+    remap_function : None|RemapFunction
+        The remap function to apply, or a suitable default will be chosen.
     """
 
     if not isinstance(ortho_helper, OrthorectificationHelper):
@@ -539,15 +540,21 @@ def add_sicd_from_ortho_helper(kmz_document, ortho_helper,
     sicd = ortho_helper.sicd
     folder = kmz_document.add_container(
         the_type='Folder', name=_get_sicd_name(sicd), description=_get_sicd_description(sicd))
+
     # write the sicd details aside from the overlay
     add_sicd_geometry_elements(sicd, kmz_document, folder,
         inc_image_corners=inc_image_corners, inc_valid_data=inc_valid_data,
         inc_scp=inc_scp, inc_collection_wedge=inc_collection_wedge)
+
     # create the ortho-rectification iterator
+    if remap_function is None:
+        remap_function = NRL()
     calculator = FullResolutionFetcher(
         ortho_helper.reader, index=ortho_helper.index, dimension=1, block_size=block_size)
     ortho_iterator = OrthorectificationIterator(
-        ortho_helper, calculator=calculator, dmin=dmin, mmult=mmult) # use the high contrast remap params
+        ortho_helper, calculator=calculator, remap_function=remap_function,
+        recalc_remap_globals=True)
+
     # write the image overlay
     _write_sicd_overlay(ortho_iterator, kmz_document, folder)
 
@@ -555,7 +562,7 @@ def add_sicd_from_ortho_helper(kmz_document, ortho_helper,
 def add_sicd_to_kmz(kmz_document, reader, index=0, pixel_limit=2048,
         inc_image_corners=False, inc_valid_data=False,
         inc_scp=False, inc_collection_wedge=False,
-        block_size=10, dmin=30, mmult=4):
+        block_size=10, remap_function=None):
     """
     Adds elements for this SICD to the provided open kmz.
 
@@ -563,7 +570,7 @@ def add_sicd_to_kmz(kmz_document, reader, index=0, pixel_limit=2048,
     ----------
     kmz_document : Document
         The kmz document, which must be open and have an associated archive.
-    reader : BaseReader
+    reader : SICDTypeReader
         The reader instance, must be of sicd type:
     index : int
         The index to use.
@@ -579,20 +586,16 @@ def add_sicd_to_kmz(kmz_document, reader, index=0, pixel_limit=2048,
         Include the aperture location and collection wedge?
     block_size : None|int|float
         The block size for the iterator
-    dmin : int|float
-        The remap parameters - the default is the high contrast remap value.
-    mmult : int|float
-        The remap parameters - the default is the high contrast remap value.
+    remap_function : None|RemapFunction
+        The remap function to apply, or a suitable default will be chosen.
 
     Returns
     -------
     None
     """
 
-    if not isinstance(reader, BaseReader):
-        raise TypeError('reader must be a instance of BaseReader. Got type {}'.format(type(reader)))
-    if reader.reader_type != "SICD":
-        raise ValueError('reader must be of sicd type.')
+    if not isinstance(reader, SICDTypeReader):
+        raise TypeError('reader must be a instance of SICDTypeReader. Got type {}'.format(type(reader)))
 
     if pixel_limit is not None:
         pixel_limit = int_func(pixel_limit)
@@ -616,21 +619,23 @@ def add_sicd_to_kmz(kmz_document, reader, index=0, pixel_limit=2048,
         if col_count > pixel_limit:
             proj_helper.col_spacing *= col_count/float(pixel_limit)
     # add the sicd details
-    add_sicd_from_ortho_helper(kmz_document, ortho_helper,
+    add_sicd_from_ortho_helper(
+        kmz_document, ortho_helper,
         inc_image_corners=inc_image_corners, inc_valid_data=inc_valid_data, inc_scp=inc_scp,
-        inc_collection_wedge=inc_collection_wedge, block_size=block_size, dmin=dmin, mmult=mmult)
+        inc_collection_wedge=inc_collection_wedge, block_size=block_size, remap_function=remap_function)
 
 
-def create_kmz_view(reader, output_directory, file_stem='view', pixel_limit=2048,
+def create_kmz_view(
+        reader, output_directory, file_stem='view', pixel_limit=2048,
         inc_image_corners=False, inc_valid_data=False,
-        inc_scp=True, inc_collection_wedge=False, block_size=10, dmin=30, mmult=4):
+        inc_scp=True, inc_collection_wedge=False, block_size=10, remap_function=None):
     """
     Create a kmz view for the reader contents. **This will create one file per
     band/polarization present in the reader.**
 
     Parameters
     ----------
-    reader : BaseReader
+    reader : SICDTypeReader
     output_directory : str
     file_stem : str
     pixel_limit : None|int
@@ -644,10 +649,8 @@ def create_kmz_view(reader, output_directory, file_stem='view', pixel_limit=2048
         Include the aperture location and collection wedge?
     block_size : None|int|float
         The block size for the iterator
-    dmin : int|float
-        The remap parameters - the default is the high contrast remap value.
-    mmult : int|float
-        The remap parameters - the default is the high contrast remap value.
+    remap_function : None|RemapFunction
+        The remap function to apply, or a suitable default will be chosen.
 
     Returns
     -------
@@ -658,7 +661,8 @@ def create_kmz_view(reader, output_directory, file_stem='view', pixel_limit=2048
     .. code-block:: python
 
         import logging
-        logging.basicConfig(level='INFO')
+        logger = logging.getLogger('sarpy')
+        logger.setLevel('INFO')
 
         import os
         from sarpy.io.complex.converter import open_complex
@@ -683,15 +687,16 @@ def create_kmz_view(reader, output_directory, file_stem='view', pixel_limit=2048
         kmz_file = os.path.join(output_directory, '{}_{}_{}.kmz'.format(file_stem,
                                                                         the_band,
                                                                         get_pol_abbreviation(the_pol)))
-        logging.info('Writing kmz file for polarization {} and band {}'.format(the_pol, the_band))
+        logger.info('Writing kmz file for polarization {} and band {}'.format(the_pol, the_band))
         with prepare_kmz_file(kmz_file, name=reader.file_name) as kmz_doc:
             for the_partition, the_index, the_sicd in sicd_reader_iterator(
                     reader, partitions=partitions, polarization=the_pol, band=the_band):
-                add_sicd_to_kmz(kmz_doc, reader,
+                add_sicd_to_kmz(
+                    kmz_doc, reader,
                     index=the_index, pixel_limit=pixel_limit,
                     inc_image_corners=inc_image_corners, inc_valid_data=inc_valid_data,
                     inc_scp=inc_scp, inc_collection_wedge=inc_collection_wedge,
-                    block_size=block_size, dmin=dmin, mmult=mmult)
+                    block_size=block_size, remap_function=remap_function)
 
     bands = set(reader.get_sicd_bands())
     pols = set(reader.get_sicd_polarizations())

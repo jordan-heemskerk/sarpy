@@ -16,6 +16,9 @@ import numpy
 
 from sarpy.compliance import string_types, integer_types
 
+
+logger = logging.getLogger(__name__)
+
 ##########
 # utility functions
 
@@ -36,7 +39,7 @@ def _compress_identical(coords):
     if coords.shape[0] < 2:
         return coords
 
-    include = numpy.zeros((coords.shape[0], ), dtype=numpy.bool)
+    include = numpy.zeros((coords.shape[0], ), dtype='bool')
     include[-1] = True
 
     for i, (first, last) in enumerate(zip(coords[:-1, :], coords[1:, :])):
@@ -671,7 +674,7 @@ class GeometryCollection(Geometry):
             raise TypeError(
                 'geometries must be None or a list of Geometry objects. Got type {}'.format(type(geometries)))
         elif len(geometries) < 2:
-            logging.warning('GeometryCollection should contain a list of geometries with length greater than 1.')
+            logger.warning('GeometryCollection should contain a list of geometries with length greater than 1.')
 
         self._geometries = []
         for entry in geometries:
@@ -1078,14 +1081,15 @@ class LineString(GeometryObject):
                 'The second dimension of coordinates must have between 2 and 4 entries. '
                 'Got shape {}'.format(coordinates.shape))
         if coordinates.shape[0] < 2:
-            logging.info(
-                'LineString coordinates should consist of at least 2 points. '
+            logger.info(
+                'LineString coordinates should consist of at least 2 points.\n\t'
                 'Got shape {}'.format(coordinates.shape))
         coordinates = _compress_identical(coordinates)
         if coordinates.shape[0] < 2:
-            logging.info(
-                'coordinates should consist of at least 2 points after suppressing '
-                'consecutive repeated points. Got shape {}'.format(coordinates.shape))
+            logger.info(
+                'coordinates should consist of at least 2 points after\n\t'
+                'suppressing consecutive repeated points.\n\t'
+                'Got shape {}'.format(coordinates.shape))
         self._coordinates = coordinates
 
     def self_intersection(self):
@@ -1412,16 +1416,18 @@ class LinearRing(LineString):
             raise ValueError('The second dimension of coordinates must have between 2 and 4 entries. '
                              'Got shape {}'.format(coordinates.shape))
         if coordinates.shape[0] < 3:
-            logging.info('coordinates must consist of at least 3 points. '
-                          'Got shape {}'.format(coordinates.shape))
+            logger.info(
+                'coordinates must consist of at least 3 points.\n\t'
+                'Got shape {}'.format(coordinates.shape))
         coordinates = _compress_identical(coordinates)
         if (coordinates[0, 0] != coordinates[-1, 0]) or \
                 (coordinates[0, 1] != coordinates[-1, 1]):
             coordinates = numpy.vstack((coordinates, coordinates[0, :]))
         if coordinates.shape[0] < 4:
-            logging.info(
-                'After compressing repeated (in sequence) points and ensuring first and '
-                'last point are the same, coordinates must contain at least 4 points. '
+            logger.info(
+                'After compressing repeated (in sequence) points and\n\t'
+                'ensuring first and last point are the same,\n\t'
+                'coordinates must contain at least 4 points.\n\t'
                 'Got shape {}'.format(coordinates.shape))
         self._coordinates = coordinates
         # construct bounding box
@@ -1552,7 +1558,7 @@ class LinearRing(LineString):
         """
 
         # we require that all these points are relevant to this slice
-        in_poly = numpy.zeros(x.shape, dtype=numpy.bool)
+        in_poly = numpy.zeros(x.shape, dtype='bool')
         crossing_counts = numpy.zeros(x.shape, dtype=numpy.int32)
         indices = segment['inds']
         orient = self.orientation
@@ -1597,7 +1603,7 @@ class LinearRing(LineString):
         numpy.ndarray
         """
 
-        out = numpy.zeros(x.shape, dtype=numpy.bool)
+        out = numpy.zeros(x.shape, dtype='bool')
 
         ind_beg, ind_end, direction = self._contained_segment_data(x, y)
         if ind_beg is None:
@@ -1657,7 +1663,7 @@ class LinearRing(LineString):
         if block_size is None or pts_x.size <= block_size:
             in_poly = self._contained(pts_x, pts_y)
         else:
-            in_poly = numpy.zeros(pts_x.shape, dtype=numpy.bool)
+            in_poly = numpy.zeros(pts_x.shape, dtype='bool')
             start_block = 0
             while start_block < pts_x.size:
                 end_block = min(start_block+block_size, pts_x.size)
@@ -1689,7 +1695,7 @@ class LinearRing(LineString):
 
         grid_x, grid_y = _validate_grid_contain_arguments(grid_x, grid_y)
 
-        out = numpy.zeros((grid_x.size, grid_y.size), dtype=numpy.bool)
+        out = numpy.zeros((grid_x.size, grid_y.size), dtype='bool')
         if self._coordinates.shape[0] < 4:
             # this is a degenerate linear ring with no interior
             return out
@@ -1783,7 +1789,9 @@ class Polygon(GeometryObject):
         for entry in coordinates[1:]:
             self.add_inner_ring(entry)
         if self.self_intersection():
-            logging.warning('Polygon has a self-intersection. This does not strictly comply with the geojson standard.')
+            logger.warning(
+                'Polygon has a self-intersection.\n\t'
+                'This does not strictly comply with the geojson standard.')
 
     def self_intersection(self):
         """
@@ -1971,7 +1979,7 @@ class Polygon(GeometryObject):
         pts_x, pts_y = _validate_contain_arguments(pts_x, pts_y)
 
         if self._outer_ring is None:
-            return numpy.zeros(pts_x.shape, dtype=numpy.bool)
+            return numpy.zeros(pts_x.shape, dtype='bool')
 
         o_shape = pts_x.shape
         in_poly = self._outer_ring.contain_coordinates(pts_x, pts_y, block_size=block_size)
@@ -2004,7 +2012,7 @@ class Polygon(GeometryObject):
         grid_x, grid_y = _validate_grid_contain_arguments(grid_x, grid_y)
 
         if self._outer_ring is None:
-            return numpy.zeros((grid_x.size, grid_y.size), dtype=numpy.bool)
+            return numpy.zeros((grid_x.size, grid_y.size), dtype='bool')
 
         in_poly = self._outer_ring.grid_contained(grid_x, grid_y)
         if self._inner_rings is not None:
@@ -2173,7 +2181,7 @@ class MultiPolygon(GeometryObject):
         pts_x, pts_y = _validate_contain_arguments(pts_x, pts_y)
 
         if self._polygons is None or len(self._polygons) == 0:
-            return numpy.zeros(pts_x.shape, dtype=numpy.bool)
+            return numpy.zeros(pts_x.shape, dtype='bool')
 
         in_poly = self._polygons[0].contain_coordinates(pts_x, pts_y, block_size=block_size)
         for entry in self._polygons[1:]:
@@ -2200,7 +2208,7 @@ class MultiPolygon(GeometryObject):
         grid_x, grid_y = _validate_grid_contain_arguments(grid_x, grid_y)
 
         if self._polygons is None or len(self._polygons) == 0:
-            return numpy.zeros((grid_x.size, grid_y.size), dtype=numpy.bool)
+            return numpy.zeros((grid_x.size, grid_y.size), dtype='bool')
 
         in_poly = self._polygons[0].grid_contained(grid_x, grid_y)
         for entry in self._polygons[1:]:
