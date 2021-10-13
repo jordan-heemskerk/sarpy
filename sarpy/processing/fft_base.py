@@ -8,7 +8,7 @@ __author__ = 'Thomas McCullough'
 import logging
 
 from sarpy.compliance import int_func
-from sarpy.io.general.base import BaseReader
+from sarpy.io.complex.base import SICDTypeReader
 from sarpy.io.complex.sicd_elements.SICD import SICDType
 from sarpy.processing.ortho_rectify import FullResolutionFetcher
 
@@ -22,6 +22,8 @@ if scipy.__version__ < '1.4':
 else:
     # noinspection PyUnresolvedReferences
     from scipy.fft import fft, ifft, fftshift, ifftshift
+
+logger = logging.getLogger(__name__)
 
 
 class FFTCalculator(FullResolutionFetcher):
@@ -41,7 +43,7 @@ class FFTCalculator(FullResolutionFetcher):
 
         Parameters
         ----------
-        reader : str|BaseReader
+        reader : str|SICDTypeReader
             Input file path or reader object, which must be of sicd type.
         dimension : int
             The dimension over which to split the sub-aperture.
@@ -87,8 +89,8 @@ class FFTCalculator(FullResolutionFetcher):
         super(FFTCalculator, self)._set_index(value)
 
         if self._sicd.SCPCOA is None or self._sicd.SCPCOA.SideOfTrack is None:
-            logging.warning(
-                'The sicd object at index {} has unpopulated SCPCOA.SideOfTrack. '
+            logger.warning(
+                'The sicd object at index {} has unpopulated SCPCOA.SideOfTrack.\n\t'
                 'Defaulting to "R", which may be incorrect.')
             self._platform_direction = 'R'
         else:

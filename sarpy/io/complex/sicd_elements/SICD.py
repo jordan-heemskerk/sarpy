@@ -2,13 +2,24 @@
 The SICDType definition.
 """
 
+__classification__ = "UNCLASSIFIED"
+__author__ = "Thomas McCullough"
+
+
 import logging
-import copy
+from copy import deepcopy
 from collections import OrderedDict
 
 import numpy
 
-from .base import Serializable, _SerializableDescriptor, DEFAULT_STRICT
+from sarpy.geometry import point_projection
+from sarpy.io.complex.naming.utils import get_sicd_name
+from sarpy.io.complex.sicd_schema import get_urn_details, get_specification_identifier
+
+from sarpy.io.xml.base import Serializable
+from sarpy.io.xml.descriptors import SerializableDescriptor
+
+from .base import DEFAULT_STRICT
 from .CollectionInfo import CollectionInfoType
 from .ImageCreation import ImageCreationType
 from .ImageData import ImageDataType
@@ -28,34 +39,23 @@ from .PFA import PFAType
 from .RMA import RMAType
 from .validation_checks import detailed_validation_checks
 
-from sarpy.geometry import point_projection
-from sarpy.io.complex.naming.utils import get_sicd_name
-
-__classification__ = "UNCLASSIFIED"
-__author__ = "Thomas McCullough"
+logger = logging.getLogger(__name__)
 
 #########
 # Module variables
-_SICD_SPECIFICATION_IDENTIFIER = 'SICD Volume 1 Design & Implementation Description Document'
-_SICD_SPECIFICATION_VERSION_1_2 = '1.2'
-_SICD_SPECIFICATION_DATE_1_2 = '2018-12-13T00:00:00Z'
+_SICD_SPECIFICATION_IDENTIFIER = get_specification_identifier()
+
+
 _SICD_SPECIFICATION_NAMESPACE_1_2 = 'urn:SICD:1.2.1'
+_details_1_2 = get_urn_details(_SICD_SPECIFICATION_NAMESPACE_1_2)
+_SICD_SPECIFICATION_VERSION_1_2 = _details_1_2['version']
+_SICD_SPECIFICATION_DATE_1_2 = _details_1_2['date']
 
-_SICD_SPECIFICATION_VERSION_1_1 = '1.1'
-_SICD_SPECIFICATION_DATE_1_1 = '2014-07-08T00:00:00Z'
+
 _SICD_SPECIFICATION_NAMESPACE_1_1 = 'urn:SICD:1.1.0'
-
-
-def get_specification_identifier():
-    """
-    Get the current specification identifier.
-
-    Returns
-    -------
-    str
-    """
-
-    return _SICD_SPECIFICATION_IDENTIFIER
+_details_1_1 = get_urn_details(_SICD_SPECIFICATION_NAMESPACE_1_1)
+_SICD_SPECIFICATION_VERSION_1_1 = _details_1_1['version']
+_SICD_SPECIFICATION_DATE_1_1 = _details_1_1['date']
 
 
 class SICDType(Serializable):
@@ -72,60 +72,60 @@ class SICDType(Serializable):
         'RadarCollection', 'ImageFormation', 'SCPCOA')
     _choice = ({'required': False, 'collection': ('RgAzComp', 'PFA', 'RMA')}, )
     # descriptors
-    CollectionInfo = _SerializableDescriptor(
+    CollectionInfo = SerializableDescriptor(
         'CollectionInfo', CollectionInfoType, _required, strict=False,
         docstring='General information about the collection.')  # type: CollectionInfoType
-    ImageCreation = _SerializableDescriptor(
+    ImageCreation = SerializableDescriptor(
         'ImageCreation', ImageCreationType, _required, strict=False,
         docstring='General information about the image creation.')  # type: ImageCreationType
-    ImageData = _SerializableDescriptor(
+    ImageData = SerializableDescriptor(
         'ImageData', ImageDataType, _required, strict=False,  # it is senseless to not have this element
         docstring='The image pixel data.')  # type: ImageDataType
-    GeoData = _SerializableDescriptor(
+    GeoData = SerializableDescriptor(
         'GeoData', GeoDataType, _required, strict=False,
         docstring='The geographic coordinates of the image coverage area.')  # type: GeoDataType
-    Grid = _SerializableDescriptor(
+    Grid = SerializableDescriptor(
         'Grid', GridType, _required, strict=False,
         docstring='The image sample grid.')  # type: GridType
-    Timeline = _SerializableDescriptor(
+    Timeline = SerializableDescriptor(
         'Timeline', TimelineType, _required, strict=False,
         docstring='The imaging collection time line.')  # type: TimelineType
-    Position = _SerializableDescriptor(
+    Position = SerializableDescriptor(
         'Position', PositionType, _required, strict=False,
         docstring='The platform and ground reference point coordinates as a function of time.')  # type: PositionType
-    RadarCollection = _SerializableDescriptor(
+    RadarCollection = SerializableDescriptor(
         'RadarCollection', RadarCollectionType, _required, strict=False,
         docstring='The radar collection information.')  # type: RadarCollectionType
-    ImageFormation = _SerializableDescriptor(
+    ImageFormation = SerializableDescriptor(
         'ImageFormation', ImageFormationType, _required, strict=False,
         docstring='The image formation process.')  # type: ImageFormationType
-    SCPCOA = _SerializableDescriptor(
+    SCPCOA = SerializableDescriptor(
         'SCPCOA', SCPCOAType, _required, strict=False,
         docstring='*Center of Aperture (COA)* for the *Scene Center Point (SCP)*.')  # type: SCPCOAType
-    Radiometric = _SerializableDescriptor(
+    Radiometric = SerializableDescriptor(
         'Radiometric', RadiometricType, _required, strict=False,
         docstring='The radiometric calibration parameters.')  # type: RadiometricType
-    Antenna = _SerializableDescriptor(
+    Antenna = SerializableDescriptor(
         'Antenna', AntennaType, _required, strict=False,
         docstring='Parameters that describe the antenna illumination patterns during the collection.'
     )  # type: AntennaType
-    ErrorStatistics = _SerializableDescriptor(
+    ErrorStatistics = SerializableDescriptor(
         'ErrorStatistics', ErrorStatisticsType, _required, strict=False,
         docstring='Parameters used to compute error statistics within the *SICD* sensor model.'
     )  # type: ErrorStatisticsType
-    MatchInfo = _SerializableDescriptor(
+    MatchInfo = SerializableDescriptor(
         'MatchInfo', MatchInfoType, _required, strict=False,
         docstring='Information about other collections that are matched to the '
                   'current collection. The current collection is the collection '
                   'from which this *SICD* product was generated.')  # type: MatchInfoType
-    RgAzComp = _SerializableDescriptor(
+    RgAzComp = SerializableDescriptor(
         'RgAzComp', RgAzCompType, _required, strict=False,
         docstring='Parameters included for a *Range, Doppler* image.')  # type: RgAzCompType
-    PFA = _SerializableDescriptor(
+    PFA = SerializableDescriptor(
         'PFA', PFAType, _required, strict=False,
         docstring='Parameters included when the image is formed using the '
                   '*Polar Formation Algorithm (PFA)*.')  # type: PFAType
-    RMA = _SerializableDescriptor(
+    RMA = SerializableDescriptor(
         'RMA', RMAType, _required, strict=False,
         docstring='Parameters included when the image is formed using the '
                   '*Range Migration Algorithm (RMA)*.')  # type: RMAType
@@ -163,6 +163,12 @@ class SICDType(Serializable):
             self._xml_ns = kwargs['_xml_ns']
         if '_xml_ns_key' in kwargs:
             self._xml_ns_key = kwargs['_xml_ns_key']
+
+        nitf = kwargs.get('_NITF', {})
+        if not isinstance(nitf, dict):
+            raise TypeError('Provided NITF options are required to be in dictionary form.')
+        self._NITF = nitf
+
         self._coa_projection = None
         self.CollectionInfo = CollectionInfo
         self.ImageCreation = ImageCreation
@@ -194,6 +200,19 @@ class SICDType(Serializable):
         """
 
         return self._coa_projection
+
+    @property
+    def NITF(self):
+        """
+        Optional dictionary of NITF header information, pertains only to subsequent
+        SICD file writing.
+
+        Returns
+        -------
+        Dict
+        """
+
+        return self._NITF
 
     @property
     def ImageFormType(self):  # type: () -> str
@@ -328,7 +347,7 @@ class SICDType(Serializable):
 
         if self.Grid is not None:
             # noinspection PyProtectedMember
-            self.Grid._derive_direction_params(self.ImageData)
+            self.Grid.derive_direction_params(self.ImageData)
 
         if self.RadarCollection is not None:
             self.RadarCollection.derive()
@@ -361,7 +380,7 @@ class SICDType(Serializable):
             if self.PFA is None:
                 self.PFA = PFAType()
             # noinspection PyProtectedMember
-            self.PFA._derive_parameters(self.Grid, self.SCPCOA, self.GeoData)
+            self.PFA._derive_parameters(self.Grid, self.SCPCOA, self.GeoData, self.Position, self.Timeline)
 
             if self.Grid is not None:
                 # noinspection PyProtectedMember
@@ -487,138 +506,144 @@ class SICDType(Serializable):
 
         # GeoData elements?
         if self.GeoData is None:
-            logging.error('Formulating a projection is not feasible because GeoData is not populated.')
+            logger.error('Formulating a projection is not feasible because GeoData is not populated.')
             return False
         if self.GeoData.SCP is None:
-            logging.error('Formulating a projection is not feasible because GeoData.SCP is not populated.')
+            logger.error('Formulating a projection is not feasible because GeoData.SCP is not populated.')
             return False
         if self.GeoData.SCP.ECF is None:
-            logging.error('Formulating a projection is not feasible because GeoData.SCP.ECF is not populated.')
+            logger.error('Formulating a projection is not feasible because GeoData.SCP.ECF is not populated.')
             return False
 
         # ImageData elements?
         if self.ImageData is None:
-            logging.error('Formulating a projection is not feasible because ImageData is not populated.')
+            logger.error('Formulating a projection is not feasible because ImageData is not populated.')
             return False
         if self.ImageData.FirstRow is None:
-            logging.error('Formulating a projection is not feasible because ImageData.FirstRow is not populated.')
+            logger.error('Formulating a projection is not feasible because ImageData.FirstRow is not populated.')
             return False
         if self.ImageData.FirstCol is None:
-            logging.error('Formulating a projection is not feasible because ImageData.FirstCol is not populated.')
+            logger.error('Formulating a projection is not feasible because ImageData.FirstCol is not populated.')
             return False
         if self.ImageData.SCPPixel is None:
-            logging.error('Formulating a projection is not feasible because ImageData.SCPPixel is not populated.')
+            logger.error('Formulating a projection is not feasible because ImageData.SCPPixel is not populated.')
             return False
         if self.ImageData.SCPPixel.Row is None:
-            logging.error('Formulating a projection is not feasible because ImageData.SCPPixel.Row is not populated.')
+            logger.error('Formulating a projection is not feasible because ImageData.SCPPixel.Row is not populated.')
             return False
         if self.ImageData.SCPPixel.Col is None:
-            logging.error('Formulating a projection is not feasible because ImageData.SCPPixel.Col is not populated.')
+            logger.error('Formulating a projection is not feasible because ImageData.SCPPixel.Col is not populated.')
             return False
 
         # Position elements?
         if self.Position is None:
-            logging.error('Formulating a projection is not feasible because Position is not populated.')
+            logger.error('Formulating a projection is not feasible because Position is not populated.')
             return False
         if self.Position.ARPPoly is None:
-            logging.error('Formulating a projection is not feasible because Position.ARPPoly is not populated.')
+            logger.error('Formulating a projection is not feasible because Position.ARPPoly is not populated.')
             return False
 
         # Grid elements?
         if self.Grid is None:
-            logging.error('Formulating a projection is not feasible because Grid is not populated.')
+            logger.error('Formulating a projection is not feasible because Grid is not populated.')
             return False
         if self.Grid.TimeCOAPoly is None:
-            logging.warning(
+            logger.warning(
                 'Formulating a projection may be inaccurate, because Grid.TimeCOAPoly is not populated and '
                 'a constant approximation will be used.')
         if self.Grid.Row is None:
-            logging.error('Formulating a projection is not feasible because Grid.Row is not populated.')
+            logger.error('Formulating a projection is not feasible because Grid.Row is not populated.')
             return False
         if self.Grid.Row.SS is None:
-            logging.error('Formulating a projection is not feasible because Grid.Row.SS is not populated.')
+            logger.error('Formulating a projection is not feasible because Grid.Row.SS is not populated.')
             return False
         if self.Grid.Col is None:
-            logging.error('Formulating a projection is not feasible because Grid.Col is not populated.')
+            logger.error('Formulating a projection is not feasible because Grid.Col is not populated.')
             return False
         if self.Grid.Col.SS is None:
-            logging.error('Formulating a projection is not feasible because Grid.Col.SS is not populated.')
+            logger.error('Formulating a projection is not feasible because Grid.Col.SS is not populated.')
             return False
         if self.Grid.Type is None:
-            logging.error('Formulating a projection is not feasible because Grid.Type is not populated.')
+            logger.error('Formulating a projection is not feasible because Grid.Type is not populated.')
             return False
 
         # specifics for Grid.Type value
         if self.Grid.Type == 'RGAZIM':
             if self.ImageFormation is None:
-                logging.error(
-                    'Formulating a projection is not feasible because Grid.Type = "RGAZIM", but '
-                    'ImageFormation is not populated.')
+                logger.error(
+                    'Formulating a projection is not feasible because Grid.Type = "RGAZIM",\n\t'
+                    'but ImageFormation is not populated.')
                 return False
             if self.ImageFormation.ImageFormAlgo is None:
-                logging.error(
-                    'Formulating a projection is not feasible because Grid.Type = "RGAZIM", but '
-                    'ImageFormation.ImageFormAlgo is not populated.')
+                logger.error(
+                    'Formulating a projection is not feasible because Grid.Type = "RGAZIM",\n\t'
+                    'but ImageFormation.ImageFormAlgo is not populated.')
                 return False
 
             if self.ImageFormation.ImageFormAlgo == 'PFA':
                 if self.PFA is None:
-                    logging.error(
-                        'ImageFormation.ImageFormAlgo is "PFA", but the PFA parameter is not populated. '
+                    logger.error(
+                        'ImageFormation.ImageFormAlgo is "PFA",\n\t'
+                        'but the PFA parameter is not populated.\n\t'
                         'No projection can be done.')
                     return False
                 if self.PFA.PolarAngPoly is None:
-                    logging.error(
-                        'ImageFormation.ImageFormAlgo is "PFA", but the PFA.PolarAngPoly parameter is not '
-                        'populated. No projection can be done.')
+                    logger.error(
+                        'ImageFormation.ImageFormAlgo is "PFA",\n\t'
+                        'but the PFA.PolarAngPoly parameter is not populated.\n\t'
+                        'No projection can be done.')
                     return False
                 if self.PFA.SpatialFreqSFPoly is None:
-                    logging.error(
-                        'ImageFormation.ImageFormAlgo is "PFA", but the PFA.SpatialFreqSFPoly parameter is not '
-                        'populated. No projection can be done.')
+                    logger.error(
+                        'ImageFormation.ImageFormAlgo is "PFA",\n\t'
+                        'but the PFA.SpatialFreqSFPoly parameter is not populated.\n\t'
+                        'No projection can be done.')
                     return False
             elif self.ImageFormation.ImageFormAlgo == 'RGAZCOMP':
                 if self.RgAzComp is None:
-                    logging.error(
-                        'ImageFormation.ImageFormAlgo is "RGAZCOMP", but the RgAzComp parameter '
-                        'is not populated. '
+                    logger.error(
+                        'ImageFormation.ImageFormAlgo is "RGAZCOMP",\n\t'
+                        'but the RgAzComp parameter is not populated.\n\t'
                         'No projection can be done.')
                     return False
                 if self.RgAzComp.AzSF is None:
-                    logging.error(
-                        'ImageFormation.ImageFormAlgo is "RGAZCOMP", but the RgAzComp.AzSF '
-                        'parameter is not populated. '
+                    logger.error(
+                        'ImageFormation.ImageFormAlgo is "RGAZCOMP",\n\t'
+                        'but the RgAzComp.AzSF parameter is not populated.\n\t'
                         'No projection can be done.')
                     return False
             else:
-                logging.error(
-                    'Grid.Type = "RGAZIM", and got unhandled ImageFormation.ImageFormAlgo {}. '
+                logger.error(
+                    'Grid.Type = "RGAZIM", and got unhandled ImageFormation.ImageFormAlgo {}.\n\t'
                     'No projection can be done.'.format(self.ImageFormation.ImageFormAlgo))
                 return False
         elif self.Grid.Type == 'RGZERO':
             if self.RMA is None or self.RMA.INCA is None:
-                logging.error(
-                    'Grid.Type is "RGZERO", but the RMA.INCA parameter is not populated. '
+                logger.error(
+                    'Grid.Type is "RGZERO", but the RMA.INCA parameter is not populated.\n\t'
                     'No projection can be done.')
                 return False
             if self.RMA.INCA.R_CA_SCP is None or self.RMA.INCA.TimeCAPoly is None \
                     or self.RMA.INCA.DRateSFPoly is None:
-                logging.error(
-                    'Grid.Type is "RGZERO", but the parameters R_CA_SCP, TimeCAPoly, or DRateSFPoly of '
-                    'RMA.INCA parameter are not populated. '
+                logger.error(
+                    'Grid.Type is "RGZERO", but the parameters\n\t'
+                    'R_CA_SCP, TimeCAPoly, or DRateSFPoly of RMA.INCA parameter are not populated.\n\t'
                     'No projection can be done.')
                 return False
         elif self.Grid.Type in ['XRGYCR', 'XCTYAT', 'PLANE']:
             if self.Grid.Row.UVectECF is None or self.Grid.Col.UVectECF is None:
-                logging.error(
+                logger.error(
                     'Grid.Type is one of ["XRGYCR", "XCTYAT", "PLANE"], but the UVectECF parameter of '
-                    'Grid.Row or Grid.Col is not populated. No projection can be formulated.')
+                    'Grid.Row or Grid.Col is not populated.\n\t'
+                    'No projection can be formulated.')
                 return False
         else:
-            logging.error('Unhandled Grid.Type {}, unclear how to formulate a projection.'.format(self.Grid.Type))
+            logger.error(
+                'Unhandled Grid.Type {},\n\t'
+                'unclear how to formulate a projection.'.format(self.Grid.Type))
             return False
 
-        # logging.info('Consider calling sicd.define_coa_projection if the sicd structure is defined.')
+        # logger.info('Consider calling sicd.define_coa_projection if the sicd structure is defined.')
         return True
 
     def define_coa_projection(self, delta_arp=None, delta_varp=None, range_bias=None,
@@ -646,7 +671,7 @@ class SICDType(Serializable):
         """
 
         if not self.can_project_coordinates():
-            logging.error('The COAProjection object cannot be defined.')
+            logger.error('The COAProjection object cannot be defined.')
             return
 
         if self._coa_projection is not None and not overide:
@@ -782,7 +807,7 @@ class SICDType(Serializable):
 
     def populate_rniirs(self, signal=None, noise=None, override=False):
         """
-        Given the signal and noise values (normalized to single pixel value),
+        Given the signal and noise values (in sigma zero power units),
         calculate and populate an estimated RNIIRS value.
 
         Parameters
@@ -797,71 +822,8 @@ class SICDType(Serializable):
         None
         """
 
-        if self.CollectionInfo is None:
-            logging.error('CollectionInfo must not be None. Nothing to be done for calculating RNIIRS.')
-            return
-
-        if self.CollectionInfo.Parameters is not None and \
-                self.CollectionInfo.Parameters.get('PREDICTED_RNIIRS', None) is not None:
-            if override:
-                logging.warning('PREDICTED_RNIIRS already populated, and this value will be overridden.')
-            else:
-                logging.info('PREDICTED_RNIIRS already populated. Nothing to be done.')
-                return
-
-        if noise is None:
-            if self.Radiometric is not None:
-                try:
-                    if self.Radiometric.NoiseLevel.NoiseLevelType != 'ABSOLUTE':
-                        logging.error(
-                            'Radiometric.NoiseLevel.NoiseLevelType must be "ABSOLUTE" to estimate noise. '
-                            'You must provide a noise estimate.')
-                        return
-                    noise = self.Radiometric.NoiseLevel.NoisePoly(0, 0)  # this is in db
-                    noise = 10**(noise/10.)  # this is absolute
-
-                    # convert to SigmaZero value
-                    noise *= self.Radiometric.SigmaZeroSFPoly(0, 0)
-                except Exception as e:
-                    logging.error('Encountered an error estimating noise for RNIIRS. {}'.format(e))
-                    return
-            else:
-                logging.error(
-                    'noise is not provided, and Radiometric is not populated. '
-                    'RNIIRS can not be estimated.')
-                return
-
-        if signal is None:
-            # noinspection PyBroadException
-            try:
-                # use 1.0 for copolar collection and 0.25 from cross-polar collection
-                pol = self.ImageFormation.TxRcvPolarizationProc
-                if pol is None or ':' not in pol:
-                    signal = 0.25
-                else:
-                    pols = pol.split(':')
-                    if pols[0] == pols[1]:
-                        signal = 1.0
-                    else:
-                        signal = 0.25
-            except Exception:
-                signal = 0.25
-
-        try:
-            bw_area = abs(self.Grid.Row.ImpRespBW*self.Grid.Col.ImpRespBW*
-                          numpy.cos(numpy.deg2rad(self.SCPCOA.SlopeAng)))
-        except Exception as e:
-            logging.error('Encountered an error estimating bandwidth area for RNIIRS. {}'.format(e))
-            return
-
-        from sarpy.io.complex.utils import snr_to_rniirs
-        inf_density, rniirs = snr_to_rniirs(bw_area, signal, noise)
-        logging.info('Calculated INFORMATION_DENSITY = {0:0.5G}, '
-                     'PREDICTED_RNIIRS = {1:0.5G}'.format(inf_density, rniirs))
-        if self.CollectionInfo.Parameters is None:
-            self.CollectionInfo.Parameters = []  # initialize
-        self.CollectionInfo.Parameters['INFORMATION_DENSITY'] = '{0:0.2G}'.format(inf_density)
-        self.CollectionInfo.Parameters['PREDICTED_RNIIRS'] = '{0:0.1f}'.format(rniirs)
+        from sarpy.processing.rgiqe import populate_rniirs_for_sicd
+        populate_rniirs_for_sicd(self, signal=signal, noise=noise, override=override)
 
     def get_suggested_name(self, product_number=1):
         """
@@ -922,9 +884,7 @@ class SICDType(Serializable):
         """
 
         out = super(SICDType, self).copy()
-        if hasattr(self, '_NITF'):
-            out._NITF = copy.deepcopy(self._NITF)
-        out.derive()
+        out._NITF = deepcopy(self._NITF)
         return out
 
     def to_xml_bytes(self, urn=None, tag='SICD', check_validity=False, strict=DEFAULT_STRICT):

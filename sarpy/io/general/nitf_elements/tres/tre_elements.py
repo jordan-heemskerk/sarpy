@@ -2,16 +2,17 @@
 Module contained elements for defining TREs - really intended as read only objects.
 """
 
+__classification__ = "UNCLASSIFIED"
+__author__ = "Thomas McCullough"
+
 import logging
 from collections import OrderedDict
 from typing import Union, List
 
-from sarpy.compliance import int_func, string_types
+from sarpy.compliance import int_func, string_types, integer_types
 from ..base import TRE
 
-
-__classification__ = "UNCLASSIFIED"
-__author__ = "Thomas McCullough"
+logger = logging.getLogger(__name__)
 
 
 def _parse_type(typ_string, leng, value, start):
@@ -86,11 +87,10 @@ class TREElement(object):
         """
 
         if hasattr(self, attribute):
-            logging.error(
-                'This instance of TRE element {} already has an attribute {},\n'
-                'but the `add_field()` method is being called for this attribute '
-                'name again. This is almost certainly '
-                'an error.'.format(self.__class__, attribute))
+            logger.error(
+                'This instance of TRE element {} already has an attribute {},\n\t'
+                'but the `add_field()` method is being called for this attribute name again.\n\t'
+                'This is almost certainly an error.'.format(self.__class__, attribute))
 
         try:
             val = _parse_type(typ_string, leng, value, self._bytes_length)
@@ -153,7 +153,7 @@ class TREElement(object):
             return val.to_bytes()
         elif isinstance(val, bytes):
             return val
-        elif isinstance(val, int) or isinstance(val, string_types):
+        elif isinstance(val, integer_types) or isinstance(val, string_types):
             return self._field_format[attribute].format(val).encode('utf-8')
         else:
             raise TypeError('Got unhandled type {}'.format(type(val)))
@@ -170,7 +170,10 @@ class TREElement(object):
         out = OrderedDict()
         for fld in self._field_ordering:
             val = getattr(self, fld)
-            if val is None or isinstance(val, string_types) or isinstance(val, (int, bytes)):
+            if val is None or \
+                    isinstance(val, bytes) or \
+                    isinstance(val, string_types) or \
+                    isinstance(val, integer_types):
                 out[fld] = val
             elif isinstance(val, TREElement):
                 out[fld] = val.to_dict()

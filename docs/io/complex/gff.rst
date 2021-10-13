@@ -1,7 +1,7 @@
-Aperture filter methods (sarpy.processing.aperture_filter)
+GFF (Sandia) format reading objects (sarpy.io.complex.gff)
 ==========================================================
 
-.. automodule:: sarpy.processing.aperture_filter
+.. automodule:: sarpy.io.complex.gff
     :members:
     :show-inheritance:
     :inherited-members:

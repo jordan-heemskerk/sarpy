@@ -11,22 +11,28 @@ import sys
 from functools import reduce
 import re
 from typing import List, Union, BinaryIO
+from datetime import datetime
 
 import numpy
 
 from sarpy.compliance import int_func, string_types
-from sarpy.io.general.utils import parse_xml_from_string, is_file_like
+from sarpy.io.xml.base import parse_xml_from_string
+from sarpy.io.general.utils import is_file_like
 from sarpy.io.general.base import AggregateChipper, SarpyIOError
 from sarpy.io.general.nitf import NITFDetails, NITFReader, NITFWriter, ImageDetails, DESDetails, \
     image_segmentation, get_npp_block, interpolate_corner_points_string
 from sarpy.io.general.nitf_elements.des import DataExtensionHeader, XMLDESSubheader
 from sarpy.io.general.nitf_elements.security import NITFSecurityTags
 from sarpy.io.general.nitf_elements.image import ImageSegmentHeader, ImageBands, ImageBand
+
+from sarpy.io.product.base import SIDDTypeReader
 from sarpy.io.product.sidd2_elements.SIDD import SIDDType
 from sarpy.io.product.sidd1_elements.SIDD import SIDDType as SIDDType1
 from sarpy.io.complex.sicd_elements.SICD import SICDType
 from sarpy.io.complex.sicd import extract_clas as extract_clas_sicd
 
+
+logger = logging.getLogger(__name__)
 
 ########
 # module variables
@@ -55,7 +61,7 @@ def is_a(file_name):
     try:
         nitf_details = SIDDDetails(file_name)
         if nitf_details.is_sidd:
-            logging.info('File {} is determined to be a SIDD (NITF format) file.'.format(file_name))
+            logger.info('File {} is determined to be a SIDD (NITF format) file.'.format(file_name))
             return SIDDReader(nitf_details)
         else:
             return None
@@ -96,8 +102,9 @@ class SIDDDetails(NITFDetails):
         if self._nitf_header.GraphicsSegments.item_sizes.size > 0:
             raise SarpyIOError('A SIDD file does not allow for graphics segments.')
         if self._nitf_header.DataExtensions.subhead_sizes.size == 0:
-            raise SarpyIOError('A SIDD file requires at least one data extension, containing the '
-                          'SIDD xml structure.')
+            raise SarpyIOError(
+                'A SIDD file requires at least one data extension, containing the '
+                'SIDD xml structure.')
         # define the sidd and sicd metadata
         self._find_sidd()
         if not self.is_sidd:
@@ -153,7 +160,7 @@ class SIDDDetails(NITFDetails):
                     elif 'SICD' in root_node.tag:
                         self._sicd_meta.append(SICDType.from_node(root_node, xml_ns, ns_key='default'))
                 except Exception as e:
-                    logging.error('Failed checking des xml header at index {} with error {}'.format(i, e))
+                    logger.error('Failed checking des xml header at index {} with error {}'.format(i, e))
                     continue
             elif subhead_bytes.startswith(b'DESIDD_XML'):
                 # This is an old format SIDD header
@@ -164,8 +171,9 @@ class SIDDDetails(NITFDetails):
                         self._is_sidd = True
                         self._sidd_meta.append(SIDDType.from_node(root_node, xml_ns, ns_key='default'))
                 except Exception as e:
-                    logging.error('We found an apparent old-style SIDD DES header at index {}, '
-                                  'but failed parsing with error {}'.format(i, e))
+                    logger.error(
+                        'We found an apparent old-style SIDD DES header at index {},\n\t'
+                        'but failed parsing with error {}'.format(i, e))
                     continue
             elif subhead_bytes.startswith(b'DESICD_XML'):
                 # This is an old format SICD header
@@ -175,8 +183,9 @@ class SIDDDetails(NITFDetails):
                     if 'SICD' in root_node.tag:
                         self._sicd_meta.append(SICDType.from_node(root_node, xml_ns, ns_key='default'))
                 except Exception as e:
-                    logging.error('We found an apparent old-style SICD DES header at index {}, '
-                                  'but failed parsing with error {}'.format(i, e))
+                    logger.error(
+                        'We found an apparent old-style SICD DES header at index {},\n\t'
+                        'but failed parsing with error {}'.format(i, e))
                     continue
 
         if not self._is_sidd:
@@ -199,12 +208,10 @@ def _check_iid_format(iid1, i):
             raise ValueError('Got poorly formatted image segment id {} at position {}'.format(iid1, i))
 
 
-class SIDDReader(NITFReader):
+class SIDDReader(NITFReader, SIDDTypeReader):
     """
     A reader object for a SIDD file (NITF container with SICD contents)
     """
-
-    __slots__ = ('_sidd_meta', '_sicd_meta')
 
     def __init__(self, nitf_details):
         """
@@ -225,9 +232,10 @@ class SIDDReader(NITFReader):
             raise ValueError(
                 'The input file passed in appears to be a NITF 2.1 file that does not contain '
                 'valid sidd metadata.')
+
         self._nitf_details = nitf_details
-        self._sidd_meta = self.nitf_details.sidd_meta
-        super(SIDDReader, self).__init__(nitf_details, reader_type="SIDD")
+        SIDDTypeReader.__init__(self, self.nitf_details.sidd_meta, self.nitf_details.sicd_meta)
+        NITFReader.__init__(self, nitf_details, reader_type="SIDD")
 
     @property
     def nitf_details(self):
@@ -237,23 +245,6 @@ class SIDDReader(NITFReader):
         """
 
         return self._nitf_details
-
-    @property
-    def sidd_meta(self):
-        # type: () -> Union[List[SIDDType], List[SIDDType1]]
-        """
-        None|List[sarpy.io.product.sidd2_elements.SIDD.SIDDType]: the sidd meta-data structure(s).
-        """
-
-        return self.nitf_details.sidd_meta
-
-    @property
-    def sicd_meta(self):
-        """
-        None|List[sarpy.io.complex.sicd_elements.SICD.SICDType]: the sicd meta-data structure(s).
-        """
-
-        return self.nitf_details.sicd_meta
 
     def _find_segments(self):
         # determine image segmentation from image headers
@@ -380,8 +371,8 @@ def validate_sidd_for_writing(sidd_meta):
             raise ValueError('Unhandled type {}'.format(type(the_sidd)))
         result = evaluate_xml_versus_schema(xml_str, urn)
         if result is False:
-            logging.warning(
-                'The provided SIDD does not properly validate '
+            logger.warning(
+                'The provided SIDD does not properly validate\n\t'
                 'against the schema for {}'.format(urn))
 
     if isinstance(sidd_meta, (SIDDType, SIDDType1)):
@@ -477,8 +468,9 @@ def extract_clsy(the_sidd):
     elif owner == 'NATO':
         return 'XN'
     else:
-        logging.warning('Got owner {}, and the CLSY will be truncated '
-                        'to two characters.'.format(owner))
+        logger.warning(
+            'Got owner {}, and the CLSY will be truncated\n\t'
+            'to two characters.'.format(owner))
         return owner[:2]
 
 
@@ -557,6 +549,12 @@ class SIDDWriter(NITFWriter):
         if sidd.ProductCreation is not None and sidd.ProductCreation.Classification is not None:
             args['CLAS'] = extract_clas(sidd)
             args['CLSY'] = extract_clsy(sidd)
+
+        security = sidd.NITF.get('Security', {})
+        # noinspection PyProtectedMember
+        for key in NITFSecurityTags._ordering:
+            if key in security:
+                args[key] = security[key]
         return NITFSecurityTags(**args)
 
     def _create_security_tags(self):
@@ -593,17 +591,23 @@ class SIDDWriter(NITFWriter):
 
         sidd = self.sidd_meta[index]
 
-        iid2 = None
-        # noinspection PyProtectedMember
-        if hasattr(sidd, '_NITF') and isinstance(sidd._NITF, dict):
-            # noinspection PyProtectedMember
-            iid2 = sidd._NITF.get('SUGGESTED_NAME', None)
+        iid2 = sidd.NITF.get('IID2', None)
+        if iid2 is None:
+            iid2 = sidd.NITF.get('FTITLE', None)
+        if iid2 is None:
+            iid2 = sidd.NITF.get('SUGGESTED_NAME', None)
         if iid2 is None:
             iid2 = 'SIDD: Unknown'
         return iid2
 
-    def _get_ftitle(self):
-        return self._get_iid2(0)
+    def _get_ftitle(self, index=0):
+        sidd = self.sidd_meta[index]
+        ftitle = sidd.NITF.get('FTITLE', None)
+        if ftitle is None:
+            ftitle = sidd.NITF.get('SUGGESTED_NAME', None)
+        if ftitle is None:
+            ftitle = 'SIDD: Unknown'
+        return ftitle
 
     def _get_fdt(self):
         sidd = self.sidd_meta[0]
@@ -613,14 +617,17 @@ class SIDDWriter(NITFWriter):
         else:
             return super(SIDDWriter, self)._get_fdt()
 
-    def _get_ostaid(self):
-        ostaid = 'Unknown'
-        sidd = self.sidd_meta[0]
-        # noinspection PyProtectedMember
-        if hasattr(sidd, '_NITF') and isinstance(sidd._NITF, dict):
-            # noinspection PyProtectedMember
-            ostaid = sidd._NITF.get('OSTAID', 'Unknown')
+    def _get_ostaid(self, index=0):
+        sidd = self.sidd_meta[index]
+        ostaid = sidd.NITF.get('OSTAID', 'Unknown')
         return ostaid
+
+    def _get_isorce(self, index=0):
+        sidd = self.sidd_meta[index]
+        isorce = sidd.NITF.get('ISORCE', sidd.ExploitationFeatures.Collections[0].Information.SensorName)
+        if isorce is None:
+            isorce = 'Unknown'
+        return isorce
 
     def _image_parameters(self, index):
         """
@@ -715,9 +722,7 @@ class SIDDWriter(NITFWriter):
 
         idatim = self._get_fdt()
 
-        isorce = ''
-        if sidd.ExploitationFeatures.Collections[0].Information.SensorName is not None:
-            isorce = sidd.ExploitationFeatures.Collections[0].Information.SensorName
+        isorce = self._get_isorce(index)
 
         rows = sidd.Measurement.PixelFootprint.Row
         cols = sidd.Measurement.PixelFootprint.Col
@@ -816,7 +821,10 @@ class SIDDWriter(NITFWriter):
         security_tags = self.security_tags
         sicd = self.sicd_meta[index]
         uh_args = sicd.get_des_details(check_version1_compliance=True)
-        desshdt = str(sicd.ImageCreation.DateTime.astype('datetime64[s]'))
+        if sicd.ImageCreation.DateTime is None:
+            desshdt = datetime.utcnow().isoformat('T', timespec='seconds')
+        else:
+            desshdt = str(sicd.ImageCreation.DateTime.astype('datetime64[s]'))
         if desshdt[-1] != 'Z':
             desshdt += 'Z'
         uh_args['DESSHDT'] = desshdt

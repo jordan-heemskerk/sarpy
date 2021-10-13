@@ -2,12 +2,17 @@
 The SIDDType 1.0 definition.
 """
 
+__classification__ = "UNCLASSIFIED"
+__author__ = "Thomas McCullough"
+
+
 import logging
 from typing import Union
 from collections import OrderedDict
+from copy import deepcopy
 
-# noinspection PyProtectedMember
-from sarpy.io.complex.sicd_elements.base import Serializable, _SerializableDescriptor, DEFAULT_STRICT
+from sarpy.io.xml.base import Serializable
+from sarpy.io.xml.descriptors import SerializableDescriptor
 from .ProductCreation import ProductCreationType
 from .Display import ProductDisplayType
 from .GeographicAndTarget import GeographicAndTargetType
@@ -18,94 +23,24 @@ from sarpy.io.product.sidd2_elements.ProductProcessing import ProductProcessingT
 from sarpy.io.product.sidd2_elements.Annotations import AnnotationsType
 from sarpy.io.product.sidd2_elements.blocks import ErrorStatisticsType, RadiometricType
 from sarpy.geometry import point_projection
+from sarpy.io.product.sidd_schema import get_specification_identifier, \
+    get_urn_details, validate_xml_ns
 
-__classification__ = "UNCLASSIFIED"
-__author__ = "Thomas McCullough"
+
+DEFAULT_STRICT = False
+logger = logging.getLogger(__name__)
 
 ############
-# namespace validate and definitIon of required entries in the namespace dictionary
-_SIDD_SPECIFICATION_IDENTIFIER = 'SIDD Volume 1 Design & Implementation Description Document'
-_SIDD_SPECIFICATION_VERSION = '1.0'
-_SIDD_SPECIFICATION_DATE = '2011-08-31T00:00:00Z'
+# namespace validate and definition of required entries in the namespace dictionary
+_SIDD_SPECIFICATION_IDENTIFIER = get_specification_identifier()
+
 _SIDD_URN = 'urn:SIDD:1.0.0'
-_ISM_URN = 'urn:us:gov:ic:ism'
-_SFA_URN = 'urn:SFA:1.2.0'
-_SICOMMON_URN = 'urn:SICommon:0.1'
-
-
-def _validate_sidd_urn(xml_ns, ns_key):
-    if xml_ns is None:
-        raise ValueError('xml_ns must not be None for SIDD interpretation.')
-
-    if ns_key is None or ns_key not in xml_ns:
-        raise ValueError('ns_key must be a key in xml_ns.')
-
-    sidd_urn = xml_ns[ns_key]
-    if sidd_urn != _SIDD_URN:
-        logging.warning('SIDD version 1 urn is expected to be "{}", '
-                        'but we got "{}". Differences in standard may lead to deserialization '
-                        'errors.'.format(_SIDD_URN, sidd_urn))
-
-
-def _validate_ism_urn(xml_ns):
-    if 'ism' not in xml_ns:
-        the_val = None
-        for key in xml_ns:
-            val = xml_ns[key]
-            if val.lower().startswith('urn:us:gov:ic:ism'):
-                the_val = val
-        if the_val is None:
-            raise ValueError('Cannot find the required ism namespace.')
-        xml_ns['ism'] = the_val
-
-    ism_urn = xml_ns['ism']
-    if ism_urn != _ISM_URN:
-        logging.warning('SIDD version 1 "ism" namespace urn is expected to be "{}", '
-                        'but we got "{}". Differences in standard may lead to deserialization '
-                        'errors.'.format(_ISM_URN, ism_urn))
-
-
-def _validate_sfa_urn(xml_ns):
-    if 'sfa' not in xml_ns:
-        the_val = None
-        for key in xml_ns:
-            val = xml_ns[key]
-            if val.lower().startswith('urn:sfa:'):
-                the_val = val
-        if the_val is None:
-            raise ValueError('Cannot find the required SFA namespace.')
-        xml_ns['sfa'] = the_val
-
-    sfa_urn = xml_ns['sfa']
-    if sfa_urn != _SFA_URN:
-        logging.warning('SIDD version 1 "SFA" namespace urn is expected to be "{}", '
-                        'but we got "{}". Differences in standard may lead to deserialization '
-                        'errors.'.format(_SFA_URN, sfa_urn))
-
-
-def _validate_sicommon_urn(xml_ns):
-    if 'sicommon' not in xml_ns:
-        the_val = None
-        for key in xml_ns:
-            val = xml_ns[key]
-            if val.lower().startswith('urn:sicommon:'):
-                the_val = val
-        if the_val is None:
-            raise ValueError('Cannot find the required SICommon namespace.')
-        xml_ns['sicommon'] = the_val
-
-    sicommon_urn = xml_ns['sicommon']
-    if sicommon_urn != _SICOMMON_URN:
-        logging.warning('SIDD version 1 "SICommon" namespace urn is expected to be "{}", '
-                        'but we got "{}". Differences in standard may lead to deserialization '
-                        'errors.'.format(_SICOMMON_URN, sicommon_urn))
-
-
-def _validate_xml_ns(xml_ns, ns_key):
-    _validate_sidd_urn(xml_ns, ns_key)
-    _validate_ism_urn(xml_ns)
-    _validate_sfa_urn(xml_ns)
-    _validate_sicommon_urn(xml_ns)
+_sidd_details = get_urn_details(_SIDD_URN)
+_SIDD_SPECIFICATION_VERSION = _sidd_details['version']
+_SIDD_SPECIFICATION_DATE = _sidd_details['date']
+_ISM_URN = _sidd_details['ism_urn']
+_SFA_URN = _sidd_details['sfa_urn']
+_SICOMMON_URN = _sidd_details['sicommon_urn']
 
 
 ##########
@@ -122,42 +57,42 @@ class SIDDType(Serializable):
     _required = (
         'ProductCreation', 'Display', 'GeographicAndTarget', 'Measurement', 'ExploitationFeatures')
     # Descriptor
-    ProductCreation = _SerializableDescriptor(
+    ProductCreation = SerializableDescriptor(
         'ProductCreation', ProductCreationType, _required, strict=DEFAULT_STRICT,
         docstring='Information related to processor, classification, '
                   'and product type.')  # type: ProductCreationType
-    Display = _SerializableDescriptor(
+    Display = SerializableDescriptor(
         'Display', ProductDisplayType, _required, strict=DEFAULT_STRICT,
         docstring='Contains information on the parameters needed to display the product in '
                   'an exploitation tool.')  # type: ProductDisplayType
-    GeographicAndTarget = _SerializableDescriptor(
+    GeographicAndTarget = SerializableDescriptor(
         'GeographicAndTarget', GeographicAndTargetType, _required, strict=DEFAULT_STRICT,
         docstring='Contains generic and extensible targeting and geographic region '
                   'information.')  # type: GeographicAndTargetType
-    Measurement = _SerializableDescriptor(
+    Measurement = SerializableDescriptor(
         'Measurement', MeasurementType, _required, strict=DEFAULT_STRICT,
         docstring='Contains the metadata necessary for performing '
                   'measurements.')  # type: MeasurementType
-    ExploitationFeatures = _SerializableDescriptor(
+    ExploitationFeatures = SerializableDescriptor(
         'ExploitationFeatures', ExploitationFeaturesType, _required, strict=DEFAULT_STRICT,
         docstring='Computed metadata regarding the input collections and '
                   'final product.')  # type: ExploitationFeaturesType
-    DownstreamReprocessing = _SerializableDescriptor(
+    DownstreamReprocessing = SerializableDescriptor(
         'DownstreamReprocessing', DownstreamReprocessingType, _required, strict=DEFAULT_STRICT,
         docstring='Metadata describing any downstream processing of the '
                   'product.')  # type: Union[None, DownstreamReprocessingType]
-    ErrorStatistics = _SerializableDescriptor(
+    ErrorStatistics = SerializableDescriptor(
         'ErrorStatistics', ErrorStatisticsType, _required, strict=DEFAULT_STRICT,
         docstring='Error statistics passed through from the SICD '
                   'metadata.')  # type: Union[None, ErrorStatisticsType]
-    Radiometric = _SerializableDescriptor(
+    Radiometric = SerializableDescriptor(
         'Radiometric', RadiometricType, _required, strict=DEFAULT_STRICT,
         docstring='Radiometric information about the product.')  # type: Union[None, RadiometricType]
-    ProductProcessing = _SerializableDescriptor(
+    ProductProcessing = SerializableDescriptor(
         'ProductProcessing', ProductProcessingType, _required, strict=DEFAULT_STRICT,
         docstring='Contains metadata related to algorithms used during '
                   'product generation.')  # type: ProductProcessingType
-    Annotations = _SerializableDescriptor(
+    Annotations = SerializableDescriptor(
         'Annotations', AnnotationsType, _required, strict=DEFAULT_STRICT,
         docstring='List of annotations for the imagery.')  # type: AnnotationsType
 
@@ -186,6 +121,12 @@ class SIDDType(Serializable):
             self._xml_ns = kwargs['_xml_ns']
         if '_xml_ns_key' in kwargs:
             self._xml_ns_key = kwargs['_xml_ns_key']
+
+        nitf = kwargs.get('_NITF', {})
+        if not isinstance(nitf, dict):
+            raise TypeError('Provided NITF options are required to be in dictionary form.')
+        self._NITF = nitf
+
         self._coa_projection = None
         self.ProductCreation = ProductCreation
         self.Display = Display
@@ -211,6 +152,19 @@ class SIDDType(Serializable):
 
         return self._coa_projection
 
+    @property
+    def NITF(self):
+        """
+        Optional dictionary of NITF header information, pertains only to subsequent
+        SIDD file writing.
+
+        Returns
+        -------
+        Dict
+        """
+
+        return self._NITF
+
     def can_project_coordinates(self):
         """
         Determines whether the necessary elements are populated to permit projection
@@ -226,7 +180,7 @@ class SIDDType(Serializable):
             return True
 
         if self.Measurement.ProjectionType != 'PlaneProjection':
-            logging.error(
+            logger.error(
                 'Formulating a projection is only supported for PlaneProjection, '
                 'got {}.'.format(self.Measurement.ProjectionType))
             return False
@@ -257,7 +211,7 @@ class SIDDType(Serializable):
         """
 
         if not self.can_project_coordinates():
-            logging.error('The COAProjection object cannot be defined.')
+            logger.error('The COAProjection object cannot be defined.')
             return
 
         if self._coa_projection is not None and not overide:
@@ -405,7 +359,6 @@ class SIDDType(Serializable):
             ('xmlns', _SIDD_URN), ('xmlns:sicommon', _SICOMMON_URN),
             ('xmlns:sfa', _SFA_URN), ('xmlns:ism', _ISM_URN)])
 
-
     @staticmethod
     def get_des_details():
         """
@@ -423,8 +376,19 @@ class SIDDType(Serializable):
             ('DESSHTN', _SIDD_URN)])
 
     @classmethod
-    def from_node(cls, node, xml_ns, ns_key=None, kwargs=None):
-        _validate_xml_ns(xml_ns, ns_key)
+    def from_node(cls, node, xml_ns, ns_key='default', kwargs=None):
+        if ns_key is None:
+            raise ValueError('ns_key must be defined.')
+        if ns_key not in xml_ns:
+            raise ValueError('ns_key {} is not in the xml namespace'.format(ns_key))
+
+        valid_ns = validate_xml_ns(xml_ns, ns_key)
+        if not xml_ns[ns_key].startswith('urn:SIDD:1.'):
+            raise ValueError('Cannot use urn {} for SIDD version 1.0'.format(xml_ns[ns_key]))
+        if not valid_ns:
+            logger.warning(
+                'SIDD namespace validation failed,\n\t'
+                'which may lead to subsequent deserialization failures')
         return super(SIDDType, cls).from_node(node, xml_ns, ns_key=ns_key, kwargs=kwargs)
 
     def to_xml_bytes(self, urn=None, tag='SIDD', check_validity=False, strict=DEFAULT_STRICT):
@@ -434,3 +398,16 @@ class SIDDType(Serializable):
 
     def to_xml_string(self, urn=None, tag='SIDD', check_validity=False, strict=DEFAULT_STRICT):
         return self.to_xml_bytes(urn=urn, tag=tag, check_validity=check_validity, strict=strict).decode('utf-8')
+
+    def copy(self):
+        """
+        Provides a deep copy.
+
+        Returns
+        -------
+        SIDDType
+        """
+
+        out = super(SIDDType, self).copy()
+        out._NITF = deepcopy(self._NITF)
+        return out
